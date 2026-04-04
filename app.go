@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 
 	"cpa-control-center/internal/backend"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -10,9 +14,11 @@ import (
 
 // App struct
 type App struct {
-	ctx     context.Context
-	backend *backend.Backend
-	initErr error
+	ctx        context.Context
+	backend    *backend.Backend
+	initErr    error
+	tray       trayController
+	allowClose atomic.Bool
 }
 
 // NewApp creates a new App application struct
@@ -35,12 +41,58 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	a.backend = service
+
+	settings, err := service.GetSettings()
+	if err != nil {
+		a.initErr = err
+		return
+	}
+	tray, err := newTrayController(
+		trayLabelsForLocale(settings.Locale),
+		trayActions{
+			Show:           a.showWindowFromTray,
+			Start:          a.startCPAFromTray,
+			Stop:           a.stopCPAFromTray,
+			OpenManagement: a.openManagementFromTray,
+			QuitLauncher:   a.quitLauncherFromTray,
+			CurrentState:   a.currentTrayMenuState,
+		},
+	)
+	if err == nil {
+		a.tray = tray
+	} else {
+		a.logTrayWarningf("初始化托盘失败: %v", err)
+	}
+}
+
+func (a *App) domReady(ctx context.Context) {
+	a.ctx = ctx
+	go func() {
+		if err := applyNativeWindowIcon(appTitle); err != nil {
+			a.logTrayWarningf("设置窗口图标失败: %v", err)
+		}
+	}()
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.tray != nil {
+		_ = a.tray.Close()
+	}
 	if a.backend != nil {
 		_ = a.backend.Close()
 	}
+	releaseNativeAppIcon()
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	if a.allowClose.Load() {
+		return false
+	}
+	if !a.shouldMinimizeToTray() {
+		return false
+	}
+	runtime.WindowHide(ctx)
+	return true
 }
 
 func (a *App) ensureBackend() (*backend.Backend, error) {
@@ -72,7 +124,12 @@ func (a *App) SaveSettings(input backend.AppSettings) (backend.AppSettings, erro
 	if err != nil {
 		return backend.AppSettings{}, err
 	}
-	return service.SaveSettings(input)
+	saved, err := service.SaveSettings(input)
+	if err != nil {
+		return backend.AppSettings{}, err
+	}
+	a.syncTrayLocale(saved.Locale)
+	return saved, nil
 }
 
 func (a *App) TestConnection(input backend.AppSettings) (backend.ConnectionResult, error) {
@@ -88,7 +145,14 @@ func (a *App) TestAndSaveSettings(input backend.AppSettings) (backend.Connection
 	if err != nil {
 		return backend.ConnectionResult{}, err
 	}
-	return service.TestAndSaveSettings(input)
+	result, err := service.TestAndSaveSettings(input)
+	if err != nil {
+		return backend.ConnectionResult{}, err
+	}
+	if settings, settingsErr := service.GetSettings(); settingsErr == nil {
+		a.syncTrayLocale(settings.Locale)
+	}
+	return result, nil
 }
 
 func (a *App) SyncInventory() (backend.InventorySyncResult, error) {
@@ -249,4 +313,271 @@ func (a *App) GetScanDetailsPage(runID int64, page int, pageSize int) (backend.S
 		return backend.ScanDetailPage{}, err
 	}
 	return service.GetScanDetailsPage(runID, page, pageSize)
+}
+
+func (a *App) GetLauncherStatus() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.GetLauncherStatus()
+}
+
+func (a *App) SaveLauncherSettings(input backend.LauncherSettings) (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.SaveLauncherSettings(input)
+}
+
+func (a *App) RefreshLauncherStatus() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.RefreshLauncherStatus()
+}
+
+func (a *App) StartLauncherService() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.StartLauncherService()
+}
+
+func (a *App) StopLauncherService() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.StopLauncherService()
+}
+
+func (a *App) ClearLauncherLogs() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.ClearLauncherLogs()
+}
+
+func (a *App) CheckLauncherForUpdate() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.CheckLauncherForUpdate()
+}
+
+func (a *App) InstallLauncherLatest(targetDirectory string) (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.InstallLauncherLatest(targetDirectory)
+}
+
+func (a *App) UpdateLauncherCPA() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.UpdateLauncherCPA()
+}
+
+func (a *App) GenerateLauncherConfig(input backend.LauncherConfigTemplateInput) (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.GenerateLauncherConfig(input)
+}
+
+func (a *App) ApplyLauncherConnection() (backend.AppSettings, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.AppSettings{}, err
+	}
+	return service.ApplyLauncherConnection()
+}
+
+func (a *App) SelectLauncherExecutablePath() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择 cli-proxy-api 可执行文件",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "可执行文件", Pattern: "*.exe"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+}
+
+func (a *App) SelectLauncherConfigPath() (string, error) {
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择 config.yaml",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "YAML 配置", Pattern: "*.yaml;*.yml"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+}
+
+func (a *App) SelectLauncherInstallDirectory() (string, error) {
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择 CPA 安装目录",
+	})
+}
+
+func (a *App) SelectLauncherConfigSavePath() (string, error) {
+	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "保存默认 CPA 配置",
+		DefaultFilename: "config.yaml",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "YAML 配置", Pattern: "*.yaml"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+}
+
+func (a *App) OpenLauncherManagementPage() error {
+	snapshot, err := a.GetLauncherStatus()
+	if err != nil {
+		return err
+	}
+	if snapshot.Runtime == nil || snapshot.Runtime.ManagementURL == "" {
+		return errors.New("当前没有可打开的管理页地址")
+	}
+	runtime.BrowserOpenURL(a.ctx, snapshot.Runtime.ManagementURL)
+	return nil
+}
+
+func (a *App) OpenLauncherLogsDirectory() error {
+	snapshot, err := a.GetLauncherStatus()
+	if err != nil {
+		return err
+	}
+	if snapshot.Runtime == nil || snapshot.Runtime.LogDirectory == "" {
+		return errors.New("当前没有可打开的日志目录")
+	}
+	return openPathWithSystem(snapshot.Runtime.LogDirectory)
+}
+
+func (a *App) OpenLauncherExecutableDirectory() error {
+	snapshot, err := a.GetLauncherStatus()
+	if err != nil {
+		return err
+	}
+	if snapshot.Runtime == nil || snapshot.Runtime.ExecutableDirectory == "" {
+		return errors.New("当前没有可打开的可执行文件目录")
+	}
+	return openPathWithSystem(snapshot.Runtime.ExecutableDirectory)
+}
+
+func (a *App) OpenLauncherConfigDirectory() error {
+	snapshot, err := a.GetLauncherStatus()
+	if err != nil {
+		return err
+	}
+	if snapshot.Runtime == nil || snapshot.Runtime.ConfigDirectory == "" {
+		return errors.New("当前没有可打开的配置目录")
+	}
+	return openPathWithSystem(snapshot.Runtime.ConfigDirectory)
+}
+
+func openPathWithSystem(path string) error {
+	target := filepath.Clean(path)
+	cmd := exec.Command("cmd", "/c", "start", "", target)
+	return cmd.Start()
+}
+
+func (a *App) shouldMinimizeToTray() bool {
+	if a.tray == nil || !a.tray.Ready() {
+		return false
+	}
+	service, err := a.ensureBackend()
+	if err != nil {
+		return false
+	}
+	settings, err := service.GetSettings()
+	if err != nil {
+		return false
+	}
+	return settings.Launcher.MinimizeToTrayOnClose
+}
+
+func (a *App) syncTrayLocale(locale string) {
+	if a.tray == nil {
+		return
+	}
+	a.tray.UpdateLabels(trayLabelsForLocale(locale))
+}
+
+func trayMenuStateFromSnapshot(snapshot backend.LauncherStatusSnapshot) trayMenuState {
+	status := strings.ToLower(strings.TrimSpace(snapshot.Status))
+	canStart := status == "stopped" || status == "start_failed"
+	canStop := status == "starting" || status == "running" || status == "stopping"
+	canOpenManagement := snapshot.Runtime != nil && strings.TrimSpace(snapshot.Runtime.ManagementURL) != ""
+	return trayMenuState{
+		CanStart:          canStart,
+		CanStop:           canStop,
+		CanOpenManagement: canOpenManagement,
+	}
+}
+
+func (a *App) currentTrayMenuState() trayMenuState {
+	snapshot, err := a.GetLauncherStatus()
+	if err != nil {
+		a.logTrayWarningf("获取托盘菜单状态失败: %v", err)
+		return trayMenuState{}
+	}
+	return trayMenuStateFromSnapshot(snapshot)
+}
+
+func (a *App) logTrayWarningf(format string, args ...interface{}) {
+	if a.ctx != nil {
+		runtime.LogWarningf(a.ctx, format, args...)
+	}
+}
+
+func (a *App) showWindowFromTray() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.Show(a.ctx)
+	runtime.WindowShow(a.ctx)
+	runtime.WindowUnminimise(a.ctx)
+}
+
+func (a *App) startCPAFromTray() {
+	if _, err := a.StartLauncherService(); err != nil {
+		a.logTrayWarningf("从托盘启动 CPA 失败: %v", err)
+	}
+}
+
+func (a *App) stopCPAFromTray() {
+	if _, err := a.StopLauncherService(); err != nil {
+		a.logTrayWarningf("从托盘停止 CPA 失败: %v", err)
+	}
+}
+
+func (a *App) openManagementFromTray() {
+	if err := a.OpenLauncherManagementPage(); err != nil {
+		a.logTrayWarningf("从托盘打开管理页失败: %v", err)
+	}
+}
+
+func (a *App) quitLauncherFromTray() {
+	if _, err := a.StopLauncherService(); err != nil {
+		a.logTrayWarningf("退出启动器前停止 CPA 失败: %v", err)
+	}
+	a.quitAppFromTray()
+}
+
+func (a *App) quitAppFromTray() {
+	if a.ctx == nil {
+		return
+	}
+	a.allowClose.Store(true)
+	runtime.Quit(a.ctx)
 }

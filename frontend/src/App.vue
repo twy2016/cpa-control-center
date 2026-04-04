@@ -11,6 +11,7 @@ import {
   WindowSetMinSize,
 } from '../wailsjs/runtime/runtime'
 import { useAccountsStore } from '@/stores/accounts'
+import { useLauncherStore } from '@/stores/launcher'
 import { useQuotasStore } from '@/stores/quotas'
 import { useSettingsStore } from '@/stores/settings'
 import { useTasksStore } from '@/stores/tasks'
@@ -22,6 +23,7 @@ import { toErrorMessage } from '@/utils/errors'
 import { cronMatchesDate, isValidCronExpression } from '@/utils/settings'
 import { debugEventName, emitDebug, emitDebugError, setDebugEnabled, snapshotDebugEntries, type DebugEntry } from '@/utils/debug'
 import DashboardView from '@/views/DashboardView.vue'
+import LauncherView from '@/views/LauncherView.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import QuotasView from '@/views/QuotasView.vue'
 import LogsView from '@/views/LogsView.vue'
@@ -30,6 +32,7 @@ import { resolveShellMode, shellModeKey, type ShellMode } from '@/layout/shell'
 
 const { t } = useI18n()
 const settingsStore = useSettingsStore()
+const launcherStore = useLauncherStore()
 const accountsStore = useAccountsStore()
 const quotasStore = useQuotasStore()
 const tasksStore = useTasksStore()
@@ -56,6 +59,7 @@ const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.user
 
 const navItems = computed<Array<{ key: ViewKey; label: string; caption: string }>>(() => [
   { key: 'dashboard', label: t('nav.dashboard'), caption: t('nav.dashboardCaption') },
+  { key: 'launcher', label: t('nav.launcher'), caption: t('nav.launcherCaption') },
   { key: 'accounts', label: t('nav.accounts'), caption: t('nav.accountsCaption') },
   { key: 'quotas', label: t('nav.quotas'), caption: t('nav.quotasCaption') },
   { key: 'logs', label: t('nav.logs'), caption: t('nav.logsCaption') },
@@ -64,6 +68,8 @@ const navItems = computed<Array<{ key: ViewKey; label: string; caption: string }
 
 const activeComponent = computed(() => {
   switch (activeView.value) {
+    case 'launcher':
+      return LauncherView
     case 'accounts':
       return AccountsView
     case 'quotas':
@@ -350,6 +356,9 @@ onMounted(async () => {
     updateViewportMetrics()
     await settingsStore.loadSettings()
     settingsStore.initSchedulerBridge()
+    launcherStore.initBridge()
+    await launcherStore.loadStatus(true)
+    await settingsStore.refreshConnectionStatus(true)
     emitDebug('app', 'settings loaded', {
       locale: settingsStore.currentLocale,
       baseUrl: settingsStore.settings.baseUrl,
@@ -387,6 +396,7 @@ onMounted(async () => {
 onUnmounted(() => {
   tasksStore.destroyEventBridge()
   settingsStore.destroySchedulerBridge()
+  launcherStore.destroyBridge()
   stopQuotaAutoRefresh()
   setDebugEnabled(false)
   unbindViewportObserver()
@@ -430,6 +440,34 @@ watch(
   ],
   () => {
     syncQuotaAutoRefresh()
+  },
+)
+
+watch(
+  () => [
+    launcherStore.status.serviceReachable,
+    launcherStore.status.runtime?.baseUrl || '',
+    settingsStore.settings.baseUrl,
+    settingsStore.settings.managementToken,
+  ],
+  async ([serviceReachable, runtimeBaseUrl, configuredBaseUrl, managementToken], previous) => {
+    const previousReachable = Array.isArray(previous) ? previous[0] : undefined
+    const previousRuntimeBaseUrl = Array.isArray(previous) ? previous[1] : undefined
+    const normalizedConfiguredBaseUrl = String(configuredBaseUrl || '').trim().replace(/\/+$/, '')
+    const normalizedRuntimeBaseUrl = String(runtimeBaseUrl || '').trim().replace(/\/+$/, '')
+
+    if (!normalizedConfiguredBaseUrl || !String(managementToken || '').trim()) {
+      settingsStore.setConnectionResult(null)
+      return
+    }
+    if (!normalizedRuntimeBaseUrl || normalizedConfiguredBaseUrl !== normalizedRuntimeBaseUrl) {
+      return
+    }
+    if (serviceReachable === previousReachable && normalizedRuntimeBaseUrl === previousRuntimeBaseUrl) {
+      return
+    }
+
+    await settingsStore.refreshConnectionStatus(true)
   },
 )
 

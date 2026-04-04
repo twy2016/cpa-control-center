@@ -30,12 +30,78 @@ type AppSettings struct {
 	AutoReenable            bool             `json:"autoReenable"`
 	ExportDirectory         string           `json:"exportDirectory"`
 	Schedule                ScheduleSettings `json:"schedule"`
+	Launcher                LauncherSettings `json:"launcher"`
 }
 
 type ScheduleSettings struct {
 	Enabled bool   `json:"enabled"`
 	Mode    string `json:"mode"`
 	Cron    string `json:"cron"`
+}
+
+type LauncherSettings struct {
+	ExecutablePath               string `json:"executablePath"`
+	ConfigPath                   string `json:"configPath"`
+	AutoStartService             bool   `json:"autoStartService"`
+	AutoStartDelaySeconds        int    `json:"autoStartDelaySeconds"`
+	LaunchOnWindowsStartup       bool   `json:"launchOnWindowsStartup"`
+	MinimizeToTrayOnClose        bool   `json:"minimizeToTrayOnClose"`
+	OpenManagementPageAfterStart bool   `json:"openManagementPageAfterStart"`
+	CheckForUpdatesOnStartup     bool   `json:"checkForUpdatesOnStartup"`
+	GitHubRepo                   string `json:"gitHubRepo"`
+	LastInstalledVersion         string `json:"lastInstalledVersion"`
+}
+
+type LauncherRuntimeInfo struct {
+	ExecutablePath             string `json:"executablePath"`
+	ExecutableDirectory        string `json:"executableDirectory"`
+	ConfigPath                 string `json:"configPath"`
+	ConfigDirectory            string `json:"configDirectory"`
+	BindHost                   string `json:"bindHost"`
+	AccessHost                 string `json:"accessHost"`
+	Port                       int    `json:"port"`
+	UseTLS                     bool   `json:"useTls"`
+	LoggingToFile              bool   `json:"loggingToFile"`
+	UsageStatisticsEnabled     bool   `json:"usageStatisticsEnabled"`
+	ControlPanelDisabled       bool   `json:"controlPanelDisabled"`
+	ManagementSecretConfigured bool   `json:"managementSecretConfigured"`
+	ManagementSecretKey        string `json:"managementSecretKey"`
+	AuthDirectory              string `json:"authDirectory"`
+	LogDirectory               string `json:"logDirectory"`
+	BaseURL                    string `json:"baseUrl"`
+	ManagementURL              string `json:"managementUrl"`
+	ServiceProbeURL            string `json:"serviceProbeUrl"`
+}
+
+type LauncherUpdateInfo struct {
+	Available      bool   `json:"available"`
+	CurrentVersion string `json:"currentVersion"`
+	TagName        string `json:"tagName"`
+	AssetSize      int64  `json:"assetSize"`
+	ReleaseURL     string `json:"releaseUrl"`
+	CheckedAt      string `json:"checkedAt"`
+	Message        string `json:"message"`
+}
+
+type LauncherStatusSnapshot struct {
+	Status           string               `json:"status"`
+	StatusText       string               `json:"statusText"`
+	StatusDetail     string               `json:"statusDetail"`
+	Managed          bool                 `json:"managed"`
+	ServiceReachable bool                 `json:"serviceReachable"`
+	ManagedProcessID int                  `json:"managedProcessId"`
+	Settings         LauncherSettings     `json:"settings"`
+	Runtime          *LauncherRuntimeInfo `json:"runtime,omitempty"`
+	Update           LauncherUpdateInfo   `json:"update"`
+	Logs             []LogEntry           `json:"logs"`
+}
+
+type LauncherConfigTemplateInput struct {
+	ConfigPath string `json:"configPath"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	ProxyURL   string `json:"proxyUrl"`
+	SecretKey  string `json:"secretKey"`
 }
 
 type SchedulerStatus struct {

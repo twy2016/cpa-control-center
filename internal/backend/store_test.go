@@ -278,6 +278,86 @@ func TestLoadSettingsDefaultsSkipKnown401WhenMissingFromLegacyFile(t *testing.T)
 	}
 }
 
+func TestLoadSettingsDefaultsLauncherSettingsWhenMissingFromLegacyFile(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	legacy := `{
+  "baseUrl": "https://example.com",
+  "managementToken": "token",
+  "locale": "en-US",
+  "schedule": {
+    "enabled": false,
+    "mode": "scan",
+    "cron": ""
+  }
+}`
+	if err := os.WriteFile(store.settingsPath, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile settings.json: %v", err)
+	}
+
+	settings, err := store.LoadSettings()
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+
+	if settings.Launcher.GitHubRepo != defaultLauncherRepo {
+		t.Fatalf("expected default launcher repo %q, got %q", defaultLauncherRepo, settings.Launcher.GitHubRepo)
+	}
+	if !settings.Launcher.OpenManagementPageAfterStart {
+		t.Fatal("expected legacy settings to default openManagementPageAfterStart to true")
+	}
+	if !settings.Launcher.CheckForUpdatesOnStartup {
+		t.Fatal("expected legacy settings to default checkForUpdatesOnStartup to true")
+	}
+	if !settings.Launcher.MinimizeToTrayOnClose {
+		t.Fatal("expected legacy settings to default minimizeToTrayOnClose to true")
+	}
+}
+
+func TestLoadSettingsDefaultsLauncherMinimizeToTrayWhenMissingFromLegacyLauncherBlock(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	legacy := `{
+  "baseUrl": "https://example.com",
+  "managementToken": "token",
+  "locale": "en-US",
+  "launcher": {
+    "executablePath": "C:\\\\cli-proxy-api.exe",
+    "configPath": "C:\\\\config.yaml",
+    "autoStartService": false,
+    "autoStartDelaySeconds": 0,
+    "launchOnWindowsStartup": false,
+    "openManagementPageAfterStart": true,
+    "checkForUpdatesOnStartup": true,
+    "gitHubRepo": "router-for-me/CLIProxyAPI",
+    "lastInstalledVersion": ""
+  }
+}`
+	if err := os.WriteFile(store.settingsPath, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile settings.json: %v", err)
+	}
+
+	settings, err := store.LoadSettings()
+	if err != nil {
+		t.Fatalf("LoadSettings: %v", err)
+	}
+	if !settings.Launcher.MinimizeToTrayOnClose {
+		t.Fatal("expected legacy launcher settings to default minimizeToTrayOnClose to true")
+	}
+}
+
 func TestStoreCodexQuotaSnapshotRoundTrip(t *testing.T) {
 	t.Parallel()
 

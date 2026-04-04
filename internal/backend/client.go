@@ -550,7 +550,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 
 func classifyAccountState(record AccountRecord) AccountRecord {
 	usageLimitReached := record.ProbeErrorKind == "usage_limit_reached"
-	record.Invalid401 = record.Unavailable || (intValue(record.APIStatusCode) == http.StatusUnauthorized && !usageLimitReached)
+	record.Invalid401 = !usageLimitReached && (record.Unavailable || intValue(record.APIStatusCode) == http.StatusUnauthorized)
 	record.QuotaLimited = !record.Invalid401 && ((intValue(record.APIStatusCode) == http.StatusOK && boolValue(record.LimitReached)) || usageLimitReached)
 	record.Recovered = !record.Invalid401 &&
 		!record.QuotaLimited &&

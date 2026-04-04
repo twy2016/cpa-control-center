@@ -217,6 +217,39 @@ func (s *Store) LoadSettings() (AppSettings, error) {
 	if _, ok := keys["quotaAutoRefreshCron"]; !ok {
 		raw.QuotaAutoRefreshCron = defaults.QuotaAutoRefreshCron
 	}
+	if launcherRaw, ok := keys["launcher"]; !ok {
+		raw.Launcher = defaults.Launcher
+	} else {
+		var launcherKeys map[string]json.RawMessage
+		if err := json.Unmarshal(launcherRaw, &launcherKeys); err != nil {
+			raw.Launcher = defaults.Launcher
+		} else {
+			if _, ok := launcherKeys["autoStartService"]; !ok {
+				raw.Launcher.AutoStartService = defaults.Launcher.AutoStartService
+			}
+			if _, ok := launcherKeys["autoStartDelaySeconds"]; !ok {
+				raw.Launcher.AutoStartDelaySeconds = defaults.Launcher.AutoStartDelaySeconds
+			}
+			if _, ok := launcherKeys["launchOnWindowsStartup"]; !ok {
+				raw.Launcher.LaunchOnWindowsStartup = defaults.Launcher.LaunchOnWindowsStartup
+			}
+			if _, ok := launcherKeys["minimizeToTrayOnClose"]; !ok {
+				raw.Launcher.MinimizeToTrayOnClose = defaults.Launcher.MinimizeToTrayOnClose
+			}
+			if _, ok := launcherKeys["openManagementPageAfterStart"]; !ok {
+				raw.Launcher.OpenManagementPageAfterStart = defaults.Launcher.OpenManagementPageAfterStart
+			}
+			if _, ok := launcherKeys["checkForUpdatesOnStartup"]; !ok {
+				raw.Launcher.CheckForUpdatesOnStartup = defaults.Launcher.CheckForUpdatesOnStartup
+			}
+			if _, ok := launcherKeys["gitHubRepo"]; !ok {
+				raw.Launcher.GitHubRepo = defaults.Launcher.GitHubRepo
+			}
+			if _, ok := launcherKeys["lastInstalledVersion"]; !ok {
+				raw.Launcher.LastInstalledVersion = defaults.Launcher.LastInstalledVersion
+			}
+		}
+	}
 
 	return normalizeSettings(raw, s.exportsDir), nil
 }

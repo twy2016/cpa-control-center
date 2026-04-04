@@ -41,12 +41,78 @@ export interface AppSettings {
   autoReenable: boolean
   exportDirectory: string
   schedule: ScheduleSettings
+  launcher: LauncherSettings
 }
 
 export interface ScheduleSettings {
   enabled: boolean
   mode: ScheduleMode
   cron: string
+}
+
+export interface LauncherSettings {
+  executablePath: string
+  configPath: string
+  autoStartService: boolean
+  autoStartDelaySeconds: number
+  launchOnWindowsStartup: boolean
+  minimizeToTrayOnClose: boolean
+  openManagementPageAfterStart: boolean
+  checkForUpdatesOnStartup: boolean
+  gitHubRepo: string
+  lastInstalledVersion: string
+}
+
+export interface LauncherRuntimeInfo {
+  executablePath: string
+  executableDirectory: string
+  configPath: string
+  configDirectory: string
+  bindHost: string
+  accessHost: string
+  port: number
+  useTls: boolean
+  loggingToFile: boolean
+  usageStatisticsEnabled: boolean
+  controlPanelDisabled: boolean
+  managementSecretConfigured: boolean
+  managementSecretKey: string
+  authDirectory: string
+  logDirectory: string
+  baseUrl: string
+  managementUrl: string
+  serviceProbeUrl: string
+}
+
+export interface LauncherUpdateInfo {
+  available: boolean
+  currentVersion: string
+  tagName: string
+  assetSize: number
+  releaseUrl: string
+  checkedAt: string
+  message: string
+}
+
+export interface LauncherStatusSnapshot {
+  status: string
+  statusText: string
+  statusDetail: string
+  managed: boolean
+  serviceReachable: boolean
+  managedProcessId: number
+  settings: LauncherSettings
+  runtime?: LauncherRuntimeInfo | null
+  update: LauncherUpdateInfo
+  logs: LogEntry[]
+}
+
+export interface LauncherConfigTemplateInput {
+  configPath: string
+  host: string
+  port: number
+  proxyUrl: string
+  secretKey: string
 }
 
 export interface SchedulerStatus {
@@ -296,7 +362,7 @@ export interface TaskFinished {
 
 export interface LogEntry {
   id?: string
-  kind: 'scan' | 'maintain' | 'inventory' | 'quota'
+  kind: 'scan' | 'maintain' | 'inventory' | 'quota' | 'launcher'
   level: string
   message: string
   timestamp: string
@@ -309,4 +375,4 @@ export interface AccountUpdate {
   record: AccountRecord
 }
 
-export type ViewKey = 'dashboard' | 'accounts' | 'quotas' | 'logs' | 'settings'
+export type ViewKey = 'dashboard' | 'launcher' | 'accounts' | 'quotas' | 'logs' | 'settings'

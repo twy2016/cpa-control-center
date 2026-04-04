@@ -42,6 +42,8 @@ func newAppOptions(app *App) *options.App {
 		},
 		BackgroundColour: appBackgroundColour(),
 		OnStartup:        app.startup,
+		OnDomReady:       app.domReady,
+		OnBeforeClose:    app.beforeClose,
 		OnShutdown:       app.shutdown,
 		Bind: []interface{}{
 			app,

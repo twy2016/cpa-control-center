@@ -24,41 +24,55 @@ const (
 	defaultScheduleMode         = "scan"
 	defaultUserAgent            = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 	defaultHistoryLimit         = 30
+	defaultLauncherRepo         = "router-for-me/CLIProxyAPI"
 	whamUsageURL                = "https://chatgpt.com/backend-api/wham/usage"
 )
 
 func defaultSettings(exportDir string) AppSettings {
 	return AppSettings{
-		Locale:               localeOrDefault(""),
-		DetailedLogs:         false,
-		TargetType:           defaultTargetType,
-		ScanStrategy:         defaultScanStrategy,
-		ScanBatchSize:        defaultScanBatchSize,
-		SkipKnown401:         true,
-		ProbeWorkers:         defaultProbeWorkers,
-		ActionWorkers:        defaultActionWorkers,
-		QuotaWorkers:         defaultQuotaWorkers,
-		TimeoutSeconds:       defaultTimeout,
-		Retries:              defaultRetries,
-		UserAgent:            defaultUserAgent,
-		QuotaAction:          defaultQuotaAction,
-		QuotaCheckFree:       false,
-		QuotaCheckPlus:       true,
-		QuotaCheckPro:        true,
-		QuotaCheckTeam:       true,
-		QuotaCheckBusiness:   true,
-		QuotaCheckEnterprise: true,
-		QuotaFreeMaxAccounts: defaultQuotaFreeMaxAccounts,
+		Locale:                  localeOrDefault(""),
+		DetailedLogs:            false,
+		TargetType:              defaultTargetType,
+		ScanStrategy:            defaultScanStrategy,
+		ScanBatchSize:           defaultScanBatchSize,
+		SkipKnown401:            true,
+		ProbeWorkers:            defaultProbeWorkers,
+		ActionWorkers:           defaultActionWorkers,
+		QuotaWorkers:            defaultQuotaWorkers,
+		TimeoutSeconds:          defaultTimeout,
+		Retries:                 defaultRetries,
+		UserAgent:               defaultUserAgent,
+		QuotaAction:             defaultQuotaAction,
+		QuotaCheckFree:          false,
+		QuotaCheckPlus:          true,
+		QuotaCheckPro:           true,
+		QuotaCheckTeam:          true,
+		QuotaCheckBusiness:      true,
+		QuotaCheckEnterprise:    true,
+		QuotaFreeMaxAccounts:    defaultQuotaFreeMaxAccounts,
 		QuotaAutoRefreshEnabled: false,
 		QuotaAutoRefreshCron:    "",
-		Delete401:            true,
-		AutoReenable:         true,
-		ExportDirectory:      exportDir,
+		Delete401:               true,
+		AutoReenable:            true,
+		ExportDirectory:         exportDir,
 		Schedule: ScheduleSettings{
 			Enabled: false,
 			Mode:    defaultScheduleMode,
 			Cron:    "",
 		},
+		Launcher: defaultLauncherSettings(),
+	}
+}
+
+func defaultLauncherSettings() LauncherSettings {
+	return LauncherSettings{
+		AutoStartService:             false,
+		AutoStartDelaySeconds:        0,
+		LaunchOnWindowsStartup:       false,
+		MinimizeToTrayOnClose:        true,
+		OpenManagementPageAfterStart: true,
+		CheckForUpdatesOnStartup:     true,
+		GitHubRepo:                   defaultLauncherRepo,
 	}
 }
 
@@ -130,11 +144,35 @@ func normalizeSettings(input AppSettings, exportDir string) AppSettings {
 		settings.Schedule.Mode = normalized
 	}
 	settings.Schedule.Cron = strings.TrimSpace(input.Schedule.Cron)
+	settings.Launcher = normalizeLauncherSettings(input.Launcher)
 
 	if settings.ExportDirectory == "" {
 		settings.ExportDirectory = exportDir
 	}
 
+	return settings
+}
+
+func normalizeLauncherSettings(input LauncherSettings) LauncherSettings {
+	settings := defaultLauncherSettings()
+	if trimmed := strings.TrimSpace(input.ExecutablePath); trimmed != "" {
+		settings.ExecutablePath = trimmed
+	}
+	if trimmed := strings.TrimSpace(input.ConfigPath); trimmed != "" {
+		settings.ConfigPath = trimmed
+	}
+	settings.AutoStartService = input.AutoStartService
+	if input.AutoStartDelaySeconds >= 0 {
+		settings.AutoStartDelaySeconds = input.AutoStartDelaySeconds
+	}
+	settings.LaunchOnWindowsStartup = input.LaunchOnWindowsStartup
+	settings.MinimizeToTrayOnClose = input.MinimizeToTrayOnClose
+	settings.OpenManagementPageAfterStart = input.OpenManagementPageAfterStart
+	settings.CheckForUpdatesOnStartup = input.CheckForUpdatesOnStartup
+	settings.GitHubRepo = defaultLauncherRepo
+	if trimmed := strings.TrimSpace(input.LastInstalledVersion); trimmed != "" {
+		settings.LastInstalledVersion = trimmed
+	}
 	return settings
 }
 

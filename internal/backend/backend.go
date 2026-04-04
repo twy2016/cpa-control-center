@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -18,6 +19,7 @@ type Backend struct {
 	logger    *Logger
 	emitter   EventEmitter
 	scheduler *schedulerRuntime
+	launcher  *launcherService
 
 	mu         sync.Mutex
 	activeKind string
@@ -58,6 +60,7 @@ func New(dataDir string, emitter EventEmitter) (*Backend, error) {
 		emitter: emitter,
 	}
 	service.scheduler = newSchedulerRuntime(service)
+	service.launcher = newLauncherService(store, logger, emitter)
 
 	settings, err := store.LoadSettings()
 	if err != nil {
@@ -66,6 +69,9 @@ func New(dataDir string, emitter EventEmitter) (*Backend, error) {
 		return nil, err
 	}
 	service.scheduler.ApplySettings(settings)
+	if service.launcher != nil {
+		service.launcher.Start()
+	}
 
 	return service, nil
 }
@@ -85,6 +91,9 @@ func (b *Backend) Close() error {
 	var firstErr error
 	if b.scheduler != nil {
 		b.scheduler.Close()
+	}
+	if b.launcher != nil {
+		b.launcher.Close()
 	}
 	if err := b.logger.Close(); err != nil {
 		firstErr = err
@@ -134,6 +143,9 @@ func (b *Backend) saveSettings(input AppSettings) (AppSettings, error) {
 	}
 	if b.scheduler != nil {
 		b.scheduler.ApplySettings(settings)
+	}
+	if b.launcher != nil {
+		b.launcher.refreshAndEmit()
 	}
 	b.emitLog("scan", "info", msg(settings.Locale, "settings.saved", stringOr(settings.BaseURL, "(empty)")))
 	return settings, nil
@@ -458,4 +470,100 @@ func ensureConfigured(settings AppSettings) error {
 		return errors.New(msg(settings.Locale, "error.management_token_required"))
 	}
 	return nil
+}
+
+func (b *Backend) GetLauncherStatus() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.GetStatus()
+}
+
+func (b *Backend) SaveLauncherSettings(input LauncherSettings) (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.SaveSettings(input)
+}
+
+func (b *Backend) RefreshLauncherStatus() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.Refresh()
+}
+
+func (b *Backend) StartLauncherService() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.StartService()
+}
+
+func (b *Backend) StopLauncherService() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.StopService()
+}
+
+func (b *Backend) ClearLauncherLogs() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.ClearLogs()
+}
+
+func (b *Backend) CheckLauncherForUpdate() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.CheckForUpdate()
+}
+
+func (b *Backend) InstallLauncherLatest(targetDirectory string) (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.InstallLatest(targetDirectory)
+}
+
+func (b *Backend) UpdateLauncherCPA() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.UpdateCPA()
+}
+
+func (b *Backend) GenerateLauncherConfig(input LauncherConfigTemplateInput) (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.GenerateDefaultConfig(input)
+}
+
+func (b *Backend) ApplyLauncherConnection() (AppSettings, error) {
+	if b.launcher == nil {
+		return AppSettings{}, errors.New("launcher not initialized")
+	}
+
+	settings, err := b.store.LoadSettings()
+	if err != nil {
+		return AppSettings{}, err
+	}
+
+	runtimeInfo, err := b.launcher.InspectRuntime()
+	if err != nil {
+		return AppSettings{}, err
+	}
+	if runtimeInfo == nil {
+		return AppSettings{}, errors.New("当前未配置本地 CPA 运行时")
+	}
+	if strings.TrimSpace(runtimeInfo.ManagementSecretKey) == "" {
+		return AppSettings{}, errors.New("当前 CPA 配置未设置 remote-management.secret-key，无法自动回填管理令牌")
+	}
+
+	settings.BaseURL = runtimeInfo.BaseURL
+	settings.ManagementToken = runtimeInfo.ManagementSecretKey
+	return b.saveSettings(settings)
 }

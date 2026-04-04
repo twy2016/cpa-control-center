@@ -1,4 +1,4 @@
-import type { AppSettings, ScheduleSettings } from '@/types'
+import type { AppSettings, LauncherSettings, ScheduleSettings } from '@/types'
 import { detectPreferredLocale } from '@/utils/locale'
 
 type Translate = (key: string, params?: Record<string, unknown>) => string
@@ -36,6 +36,7 @@ export function createDefaultSettings(): AppSettings {
     autoReenable: true,
     exportDirectory: '',
     schedule: createDefaultScheduleSettings(),
+    launcher: createDefaultLauncherSettings(),
   }
 }
 
@@ -105,6 +106,21 @@ export function createDefaultScheduleSettings(): ScheduleSettings {
     enabled: false,
     mode: 'scan',
     cron: '',
+  }
+}
+
+export function createDefaultLauncherSettings(): LauncherSettings {
+  return {
+    executablePath: '',
+    configPath: '',
+    autoStartService: false,
+    autoStartDelaySeconds: 0,
+    launchOnWindowsStartup: false,
+    minimizeToTrayOnClose: true,
+    openManagementPageAfterStart: true,
+    checkForUpdatesOnStartup: true,
+    gitHubRepo: 'router-for-me/CLIProxyAPI',
+    lastInstalledVersion: '',
   }
 }
 

@@ -4,7 +4,7 @@ import { GetSchedulerStatus, GetSettings, SaveSettings, TestAndSaveSettings, Tes
 import { backend as backendModels } from '../../wailsjs/go/models'
 import { i18n, setI18nLocale } from '@/i18n'
 import type { AppSettings, ConnectionResult, SchedulerStatus } from '@/types'
-import { createDefaultScheduleSettings, createDefaultSettings, validateSettings } from '@/utils/settings'
+import { createDefaultLauncherSettings, createDefaultScheduleSettings, createDefaultSettings, validateSettings } from '@/utils/settings'
 import { toErrorMessage } from '@/utils/errors'
 import { detectPreferredLocale, normalizeLocaleCode } from '@/utils/locale'
 
@@ -54,6 +54,18 @@ export const useSettingsStore = defineStore('settingsStore', {
     currentLocale: (state) => normalizeLocaleCode(state.settings.locale || i18n.global.locale.value),
   },
   actions: {
+    setConnectionResult(result?: Partial<ConnectionResult> | null) {
+      if (!result) {
+        this.connection = null
+        return
+      }
+      this.connection = {
+        ok: Boolean(result.ok),
+        message: result.message || '',
+        accountCount: Number(result.accountCount || 0),
+        checkedAt: result.checkedAt || new Date().toISOString(),
+      }
+    },
     mergeSettings(result: Partial<AppSettings>) {
       this.settings = {
         ...createDefaultSettings(),
@@ -61,6 +73,10 @@ export const useSettingsStore = defineStore('settingsStore', {
         schedule: {
           ...createDefaultScheduleSettings(),
           ...(result.schedule ?? {}),
+        },
+        launcher: {
+          ...createDefaultLauncherSettings(),
+          ...(result.launcher ?? {}),
         },
       }
       this.applyLocale(this.settings.locale)
@@ -110,6 +126,30 @@ export const useSettingsStore = defineStore('settingsStore', {
         this.loading = false
       }
     },
+    async refreshConnectionStatus(silent = true) {
+      if (!this.settings.baseUrl.trim() || !this.settings.managementToken.trim()) {
+        this.connection = null
+        return this.connection
+      }
+
+      try {
+        const result = await TestConnection(new backendModels.AppSettings(this.settings))
+        this.setConnectionResult(result as unknown as Partial<ConnectionResult>)
+        return this.connection
+      } catch (error) {
+        const message = toErrorMessage(error)
+        this.setConnectionResult({
+          ok: false,
+          message,
+          accountCount: 0,
+          checkedAt: new Date().toISOString(),
+        })
+        if (!silent) {
+          throw new Error(message)
+        }
+        return this.connection
+      }
+    },
     async saveLocalePreference(locale: string) {
       const previous = this.currentLocale
       this.applyLocale(locale)
@@ -125,8 +165,7 @@ export const useSettingsStore = defineStore('settingsStore', {
       if (Object.keys(this.errors).length > 0) {
         throw new Error(i18n.global.t('validation.fixBeforeTesting'))
       }
-      this.connection = await TestConnection(new backendModels.AppSettings(this.settings))
-      return this.connection
+      return await this.refreshConnectionStatus(false)
     },
     async saveSettings() {
       this.errors = validateSettings(this.settings, i18n.global.t)
@@ -149,7 +188,7 @@ export const useSettingsStore = defineStore('settingsStore', {
         this.saving = true
         const connection = await TestAndSaveSettings(new backendModels.AppSettings(this.settings))
         await this.loadSettings()
-        this.connection = connection
+        this.setConnectionResult(connection as unknown as Partial<ConnectionResult>)
         return connection
       } catch (error) {
         throw new Error(toErrorMessage(error))

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { LogEntry } from '@/types'
 import { formatDateTime } from '@/utils/format'
@@ -9,14 +9,43 @@ import { shellModeKey } from '@/layout/shell'
 const { t } = useI18n()
 const injectedShellMode = inject(shellModeKey, null)
 const shellMode = computed(() => injectedShellMode?.value ?? 'desktop')
+const consoleRef = ref<HTMLDivElement | null>(null)
 
-defineProps<{
+const props = defineProps<{
   entries: LogEntry[]
 }>()
+
+function scrollToBottom() {
+  const el = consoleRef.value
+  if (!el) {
+    return
+  }
+  el.scrollTop = el.scrollHeight
+}
+
+function isNearBottom() {
+  const el = consoleRef.value
+  if (!el) {
+    return true
+  }
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 56
+}
+
+watch(
+  () => props.entries.length,
+  async (_, previousLength) => {
+    const stickToBottom = previousLength === undefined || isNearBottom()
+    await nextTick()
+    if (stickToBottom) {
+      scrollToBottom()
+    }
+  },
+  { flush: 'post', immediate: true },
+)
 </script>
 
 <template>
-  <div class="log-console" :class="{ 'log-console--compact': shellMode === 'compact' }">
+  <div ref="consoleRef" class="log-console" :class="{ 'log-console--compact': shellMode === 'compact' }">
     <div v-if="entries.length === 0" class="log-empty">
       {{ t('logs.empty') }}
     </div>

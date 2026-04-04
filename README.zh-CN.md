@@ -351,10 +351,24 @@ cpa-control-center/
 wails dev
 ```
 
+### 安装前端依赖
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
 ### Windows 构建
 
 ```bash
-wails build
+wails build -clean
+```
+
+如果要显式指定 Windows 架构目标：
+
+```bash
+wails build -platform windows/amd64 -clean
 ```
 
 ### macOS 构建
@@ -364,6 +378,8 @@ wails build
 ```bash
 bash ./scripts/build-macos.sh
 ```
+
+Wails 构建产物会输出到 `build/bin/`。
 
 ## 安全建议
 

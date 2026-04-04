@@ -347,10 +347,24 @@ cpa-control-center/
 wails dev
 ```
 
+### Install Frontend Dependencies
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
 ### Windows Build
 
 ```bash
-wails build
+wails build -clean
+```
+
+To build an explicit Windows architecture target:
+
+```bash
+wails build -platform windows/amd64 -clean
 ```
 
 ### macOS Build
@@ -360,6 +374,8 @@ Run this on a Mac or a `macos-latest` GitHub Actions runner:
 ```bash
 bash ./scripts/build-macos.sh
 ```
+
+Wails build artifacts are written to `build/bin/`.
 
 ## Safety Notes
 

@@ -476,3 +476,59 @@ func TestClientProbeTreatsUsageLimit401AsQuotaLimited(t *testing.T) {
 		t.Fatalf("expected 1 probe attempt, got %d", hits)
 	}
 }
+
+func TestClientProbeTreatsUsageLimit401AsQuotaLimitedEvenWhenUnavailable(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status_code": 401,
+				"body": `{
+					"error": {
+						"type": "usage_limit_reached",
+						"message": "The usage limit has been reached",
+						"plan_type": "free"
+					}
+				}`,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	settings := AppSettings{
+		BaseURL:         server.URL,
+		ManagementToken: "token",
+		Locale:          localeEnglish,
+		TimeoutSeconds:  5,
+		Retries:         0,
+		UserAgent:       defaultUserAgent,
+	}
+
+	record := AccountRecord{
+		Name:             "quota-free-unavailable.json",
+		AuthIndex:        "quota-free-unavailable",
+		Type:             "codex",
+		Provider:         "codex",
+		ChatGPTAccountID: "acct-free-unavailable",
+		Unavailable:      true,
+	}
+
+	probed := client.ProbeUsage(context.Background(), settings, record)
+	if probed.StateKey != stateQuotaLimited {
+		t.Fatalf("expected quota_limited state when usage limit is recognized, got %+v", probed)
+	}
+	if probed.Invalid401 {
+		t.Fatalf("usage_limit_reached should override unavailable invalid_401 classification: %+v", probed)
+	}
+	if !probed.QuotaLimited {
+		t.Fatalf("expected quota_limited=true, got %+v", probed)
+	}
+	if probed.ProbeErrorText != "The usage limit has been reached" {
+		t.Fatalf("expected usage limit message to be preserved, got %+v", probed)
+	}
+}
