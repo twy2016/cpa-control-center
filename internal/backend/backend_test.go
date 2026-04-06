@@ -748,6 +748,35 @@ func TestParseQuotaBucketResultSupportsPrimarySecondaryRateLimitWindows(t *testi
 	}
 }
 
+func TestParseQuotaBucketResultMatchesGenericRateLimitBucketsMidWindow(t *testing.T) {
+	payload := map[string]any{
+		"plan_type": "team",
+		"rate_limit": map[string]any{
+			"primary": map[string]any{
+				"used_percent":        12,
+				"reset_at":            "2026-03-13T09:22:56Z",
+				"reset_after_seconds": 5633,
+			},
+			"secondary": map[string]any{
+				"used_percent":        57,
+				"reset_at":            "2026-03-18T12:33:46Z",
+				"reset_after_seconds": 449083,
+			},
+		},
+	}
+
+	result, err := parseQuotaBucketResult(payload)
+	if err != nil {
+		t.Fatalf("parseQuotaBucketResult: %v", err)
+	}
+	if result.fiveHour == nil || result.fiveHour.resetAt != "2026-03-13T09:22:56Z" || result.fiveHour.remainingPercent != 88 {
+		t.Fatalf("unexpected generic primary five-hour bucket mid-window: %+v", result.fiveHour)
+	}
+	if result.weekly == nil || result.weekly.resetAt != "2026-03-18T12:33:46Z" || result.weekly.remainingPercent != 43 {
+		t.Fatalf("unexpected generic secondary weekly bucket mid-window: %+v", result.weekly)
+	}
+}
+
 func TestParseQuotaBucketResultMapsFreePrimaryWindowToWeekly(t *testing.T) {
 	payload := map[string]any{
 		"plan_type": "free",

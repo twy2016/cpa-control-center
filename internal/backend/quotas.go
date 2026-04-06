@@ -837,8 +837,8 @@ func quotaCandidateMatchScore(candidate quotaCandidate, bucket quotaBucketKey, p
 	isReview := strings.Contains(path, "code_review") || strings.Contains(path, "codereview") || strings.Contains(path, "review")
 	isWeekly := strings.Contains(path, "weekly") || strings.Contains(path, "week")
 	isFiveHour := strings.Contains(path, "five_hour") || strings.Contains(path, "fivehour") || strings.Contains(path, "5h") || strings.Contains(path, "5_hour")
-	isRateLimitPrimary := strings.Contains(path, "rate_limit.primary_window")
-	isRateLimitSecondary := strings.Contains(path, "rate_limit.secondary_window")
+	isRateLimitPrimary := quotaPathContainsAny(path, "rate_limit.primary_window", "rate_limit.primary")
+	isRateLimitSecondary := quotaPathContainsAny(path, "rate_limit.secondary_window", "rate_limit.secondary")
 	matched := false
 
 	switch bucket {
@@ -917,6 +917,15 @@ func quotaCandidateMatchScore(candidate quotaCandidate, bucket quotaBucketKey, p
 		return -1
 	}
 	return score
+}
+
+func quotaPathContainsAny(path string, fragments ...string) bool {
+	for _, fragment := range fragments {
+		if strings.Contains(path, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func nearDuration(actual time.Duration, expected time.Duration, tolerance time.Duration) bool {

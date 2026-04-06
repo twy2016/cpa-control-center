@@ -104,6 +104,74 @@ type LauncherConfigTemplateInput struct {
 	SecretKey  string `json:"secretKey"`
 }
 
+type CodexLocalConfigImportInput struct {
+	Name string `json:"name"`
+}
+
+type CodexLocalConfigSwitchInput struct {
+	Name string `json:"name"`
+}
+
+type CodexLocalConfigSaveInput struct {
+	Name       string `json:"name"`
+	ConfigToml string `json:"configToml"`
+	AuthJSON   string `json:"authJson"`
+}
+
+type CodexLocalConfigValidationResult struct {
+	Name            string `json:"name"`
+	OK              bool   `json:"ok"`
+	Message         string `json:"message"`
+	ConfigTomlValid bool   `json:"configTomlValid"`
+	AuthJSONValid   bool   `json:"authJsonValid"`
+	TestedAt        string `json:"testedAt"`
+}
+
+type CodexLocalConfigConnectionTestResult struct {
+	Name         string `json:"name"`
+	OK           bool   `json:"ok"`
+	Message      string `json:"message"`
+	ProviderName string `json:"providerName"`
+	BaseURL      string `json:"baseUrl"`
+	Model        string `json:"model"`
+	StatusCode   *int   `json:"statusCode"`
+	TestedAt     string `json:"testedAt"`
+}
+
+type CodexLocalConfigProfile struct {
+	Name            string `json:"name"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+	LastActivatedAt string `json:"lastActivatedAt"`
+	HasConfigToml   bool   `json:"hasConfigToml"`
+	HasAuthJSON     bool   `json:"hasAuthJson"`
+}
+
+type CodexLocalConfigBackup struct {
+	Name          string `json:"name"`
+	CreatedAt     string `json:"createdAt"`
+	HasConfigToml bool   `json:"hasConfigToml"`
+	HasAuthJSON   bool   `json:"hasAuthJson"`
+}
+
+type CodexLocalConfigSnapshot struct {
+	Profiles            []CodexLocalConfigProfile `json:"profiles"`
+	ActiveProfileName   string                    `json:"activeProfileName"`
+	DefaultDirectory    string                    `json:"defaultDirectory"`
+	ConfigPath          string                    `json:"configPath"`
+	AuthPath            string                    `json:"authPath"`
+	CurrentConfigExists bool                      `json:"currentConfigExists"`
+	CurrentAuthExists   bool                      `json:"currentAuthExists"`
+	Backups             []CodexLocalConfigBackup  `json:"backups"`
+}
+
+type CodexLocalConfigProfileContent struct {
+	Name       string `json:"name"`
+	ConfigToml string `json:"configToml"`
+	AuthJSON   string `json:"authJson"`
+	UpdatedAt  string `json:"updatedAt"`
+}
+
 type SchedulerStatus struct {
 	Enabled           bool   `json:"enabled"`
 	Mode              string `json:"mode"`

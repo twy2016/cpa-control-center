@@ -24,6 +24,7 @@ import { cronMatchesDate, isValidCronExpression } from '@/utils/settings'
 import { debugEventName, emitDebug, emitDebugError, setDebugEnabled, snapshotDebugEntries, type DebugEntry } from '@/utils/debug'
 import DashboardView from '@/views/DashboardView.vue'
 import LauncherView from '@/views/LauncherView.vue'
+import CodexConfigsView from '@/views/CodexConfigsView.vue'
 import AccountsView from '@/views/AccountsView.vue'
 import QuotasView from '@/views/QuotasView.vue'
 import LogsView from '@/views/LogsView.vue'
@@ -60,6 +61,7 @@ const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.user
 const navItems = computed<Array<{ key: ViewKey; label: string; caption: string }>>(() => [
   { key: 'dashboard', label: t('nav.dashboard'), caption: t('nav.dashboardCaption') },
   { key: 'launcher', label: t('nav.launcher'), caption: t('nav.launcherCaption') },
+  { key: 'codexConfigs', label: t('nav.codexConfigs'), caption: t('nav.codexConfigsCaption') },
   { key: 'accounts', label: t('nav.accounts'), caption: t('nav.accountsCaption') },
   { key: 'quotas', label: t('nav.quotas'), caption: t('nav.quotasCaption') },
   { key: 'logs', label: t('nav.logs'), caption: t('nav.logsCaption') },
@@ -70,6 +72,8 @@ const activeComponent = computed(() => {
   switch (activeView.value) {
     case 'launcher':
       return LauncherView
+    case 'codexConfigs':
+      return CodexConfigsView
     case 'accounts':
       return AccountsView
     case 'quotas':

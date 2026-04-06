@@ -115,6 +115,74 @@ export interface LauncherConfigTemplateInput {
   secretKey: string
 }
 
+export interface CodexLocalConfigImportInput {
+  name: string
+}
+
+export interface CodexLocalConfigSwitchInput {
+  name: string
+}
+
+export interface CodexLocalConfigSaveInput {
+  name: string
+  configToml: string
+  authJson: string
+}
+
+export interface CodexLocalConfigValidationResult {
+  name: string
+  ok: boolean
+  message: string
+  configTomlValid: boolean
+  authJsonValid: boolean
+  testedAt: string
+}
+
+export interface CodexLocalConfigConnectionTestResult {
+  name: string
+  ok: boolean
+  message: string
+  providerName: string
+  baseUrl: string
+  model: string
+  statusCode?: number | null
+  testedAt: string
+}
+
+export interface CodexLocalConfigProfile {
+  name: string
+  createdAt: string
+  updatedAt: string
+  lastActivatedAt: string
+  hasConfigToml: boolean
+  hasAuthJson: boolean
+}
+
+export interface CodexLocalConfigBackup {
+  name: string
+  createdAt: string
+  hasConfigToml: boolean
+  hasAuthJson: boolean
+}
+
+export interface CodexLocalConfigSnapshot {
+  profiles: CodexLocalConfigProfile[]
+  activeProfileName: string
+  defaultDirectory: string
+  configPath: string
+  authPath: string
+  currentConfigExists: boolean
+  currentAuthExists: boolean
+  backups: CodexLocalConfigBackup[]
+}
+
+export interface CodexLocalConfigProfileContent {
+  name: string
+  configToml: string
+  authJson: string
+  updatedAt: string
+}
+
 export interface SchedulerStatus {
   enabled: boolean
   mode: ScheduleMode
@@ -375,4 +443,4 @@ export interface AccountUpdate {
   record: AccountRecord
 }
 
-export type ViewKey = 'dashboard' | 'launcher' | 'accounts' | 'quotas' | 'logs' | 'settings'
+export type ViewKey = 'dashboard' | 'launcher' | 'codexConfigs' | 'accounts' | 'quotas' | 'logs' | 'settings'

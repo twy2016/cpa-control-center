@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,70 @@ func (a *App) GetSettings() (backend.AppSettings, error) {
 		return backend.AppSettings{}, err
 	}
 	return service.GetSettings()
+}
+
+func (a *App) GetCodexLocalConfigSnapshot() (backend.CodexLocalConfigSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigSnapshot{}, err
+	}
+	return service.GetCodexLocalConfigSnapshot()
+}
+
+func (a *App) ImportCurrentCodexLocalConfig(input backend.CodexLocalConfigImportInput) (backend.CodexLocalConfigSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigSnapshot{}, err
+	}
+	return service.ImportCurrentCodexLocalConfig(input)
+}
+
+func (a *App) GetCodexLocalConfigProfileContent(name string) (backend.CodexLocalConfigProfileContent, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigProfileContent{}, err
+	}
+	return service.GetCodexLocalConfigProfileContent(name)
+}
+
+func (a *App) SaveCodexLocalConfigProfileContent(input backend.CodexLocalConfigSaveInput) (backend.CodexLocalConfigProfileContent, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigProfileContent{}, err
+	}
+	return service.SaveCodexLocalConfigProfileContent(input)
+}
+
+func (a *App) TestCodexLocalConfigProfileContent(input backend.CodexLocalConfigSaveInput) (backend.CodexLocalConfigValidationResult, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigValidationResult{}, err
+	}
+	return service.TestCodexLocalConfigProfileContent(input)
+}
+
+func (a *App) TestCodexLocalConfigProfileConnection(name string) (backend.CodexLocalConfigConnectionTestResult, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigConnectionTestResult{}, err
+	}
+	return service.TestCodexLocalConfigProfileConnection(name)
+}
+
+func (a *App) SwitchCodexLocalConfigProfile(input backend.CodexLocalConfigSwitchInput) (backend.CodexLocalConfigSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigSnapshot{}, err
+	}
+	return service.SwitchCodexLocalConfigProfile(input)
+}
+
+func (a *App) DeleteCodexLocalConfigProfile(name string) (backend.CodexLocalConfigSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigSnapshot{}, err
+	}
+	return service.DeleteCodexLocalConfigProfile(name)
 }
 
 func (a *App) SaveSettings(input backend.AppSettings) (backend.AppSettings, error) {
@@ -483,6 +548,20 @@ func (a *App) OpenLauncherConfigDirectory() error {
 		return errors.New("当前没有可打开的配置目录")
 	}
 	return openPathWithSystem(snapshot.Runtime.ConfigDirectory)
+}
+
+func (a *App) OpenCodexLocalConfigDirectory() error {
+	snapshot, err := a.GetCodexLocalConfigSnapshot()
+	if err != nil {
+		return err
+	}
+	if snapshot.DefaultDirectory == "" {
+		return errors.New("当前没有可打开的 Codex 配置目录")
+	}
+	if err := os.MkdirAll(snapshot.DefaultDirectory, 0o755); err != nil {
+		return err
+	}
+	return openPathWithSystem(snapshot.DefaultDirectory)
 }
 
 func openPathWithSystem(path string) error {

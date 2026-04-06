@@ -108,6 +108,38 @@ func (b *Backend) GetSettings() (AppSettings, error) {
 	return b.store.LoadSettings()
 }
 
+func (b *Backend) GetCodexLocalConfigSnapshot() (CodexLocalConfigSnapshot, error) {
+	return newCodexLocalConfigManager(b.store).Snapshot()
+}
+
+func (b *Backend) ImportCurrentCodexLocalConfig(input CodexLocalConfigImportInput) (CodexLocalConfigSnapshot, error) {
+	return newCodexLocalConfigManager(b.store).ImportCurrent(input)
+}
+
+func (b *Backend) GetCodexLocalConfigProfileContent(name string) (CodexLocalConfigProfileContent, error) {
+	return newCodexLocalConfigManager(b.store).ProfileContent(name)
+}
+
+func (b *Backend) SaveCodexLocalConfigProfileContent(input CodexLocalConfigSaveInput) (CodexLocalConfigProfileContent, error) {
+	return newCodexLocalConfigManager(b.store).SaveProfileContent(input)
+}
+
+func (b *Backend) TestCodexLocalConfigProfileContent(input CodexLocalConfigSaveInput) (CodexLocalConfigValidationResult, error) {
+	return newCodexLocalConfigManager(b.store).TestProfileContent(input), nil
+}
+
+func (b *Backend) TestCodexLocalConfigProfileConnection(name string) (CodexLocalConfigConnectionTestResult, error) {
+	return newCodexLocalConfigManager(b.store).TestSavedProfileConnection(name)
+}
+
+func (b *Backend) SwitchCodexLocalConfigProfile(input CodexLocalConfigSwitchInput) (CodexLocalConfigSnapshot, error) {
+	return newCodexLocalConfigManager(b.store).Switch(input)
+}
+
+func (b *Backend) DeleteCodexLocalConfigProfile(name string) (CodexLocalConfigSnapshot, error) {
+	return newCodexLocalConfigManager(b.store).Delete(name)
+}
+
 func (b *Backend) SaveSettings(input AppSettings) (AppSettings, error) {
 	return b.saveSettings(input)
 }
