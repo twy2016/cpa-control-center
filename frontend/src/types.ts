@@ -92,6 +92,7 @@ export interface LauncherUpdateInfo {
   releaseUrl: string
   checkedAt: string
   message: string
+  checkSource: string
 }
 
 export interface LauncherStatusSnapshot {
@@ -125,6 +126,7 @@ export interface CodexLocalConfigSwitchInput {
 
 export interface CodexLocalConfigSaveInput {
   name: string
+  originalName: string
   configToml: string
   authJson: string
 }
@@ -178,9 +180,16 @@ export interface CodexLocalConfigSnapshot {
 
 export interface CodexLocalConfigProfileContent {
   name: string
+  originalName: string
   configToml: string
   authJson: string
   updatedAt: string
+}
+
+export interface CodexLocalConfigTransferResult {
+  path: string
+  count: number
+  names: string[]
 }
 
 export interface SchedulerStatus {

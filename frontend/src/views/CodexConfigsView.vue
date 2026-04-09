@@ -8,7 +8,6 @@ import { toErrorMessage } from '@/utils/errors'
 
 const { t } = useI18n()
 const codexLocalConfigStore = useCodexLocalConfigStore()
-const codexImportName = ref('')
 const newCodexProfileName = ref('')
 const newCodexConfigToml = ref('')
 const newCodexAuthJson = ref('')
@@ -63,15 +62,43 @@ async function openCodexLocalDirectory() {
   }
 }
 
-async function importCurrentCodexProfile() {
-  if (!codexImportName.value.trim()) {
-    ElMessage.error(t('launcher.codexLocal.errors.nameRequired'))
-    return
+function fillCreateTemplate() {
+  const template = codexLocalConfigStore.createProfileTemplate(newCodexProfileName.value)
+  newCodexConfigToml.value = template.configToml
+  newCodexAuthJson.value = template.authJson
+}
+
+function profileNameExists(name: string, originalName = '') {
+  const candidate = name.trim().toLowerCase()
+  const original = originalName.trim().toLowerCase()
+  if (!candidate) {
+    return false
   }
+  return codexProfiles.value.some((profile) => {
+    const profileName = profile.name.trim().toLowerCase()
+    return profileName === candidate && profileName !== original
+  })
+}
+
+async function importCodexProfilesFromFile() {
   try {
-    await codexLocalConfigStore.importCurrent(codexImportName.value)
-    codexImportName.value = ''
-    ElMessage.success(t('launcher.codexLocal.messages.imported'))
+    const result = await codexLocalConfigStore.importProfilesFromFile()
+    if (!result.count) {
+      return
+    }
+    ElMessage.success(t('launcher.codexLocal.messages.importedAll', { count: result.count }))
+  } catch (error) {
+    ElMessage.error(toErrorMessage(error))
+  }
+}
+
+async function exportAllCodexProfiles() {
+  try {
+    const result = await codexLocalConfigStore.exportAllProfiles()
+    if (!result.count || !result.path) {
+      return
+    }
+    ElMessage.success(t('launcher.codexLocal.messages.exportedAll', { count: result.count, path: result.path }))
   } catch (error) {
     ElMessage.error(toErrorMessage(error))
   }
@@ -91,7 +118,7 @@ async function createCodexProfile() {
     ElMessage.error(t('launcher.codexLocal.errors.nameRequired'))
     return
   }
-  if (codexProfiles.value.some((profile) => profile.name.trim().toLowerCase() === newCodexProfileName.value.trim().toLowerCase())) {
+  if (profileNameExists(newCodexProfileName.value)) {
     ElMessage.error(t('launcher.codexLocal.errors.nameExists'))
     return
   }
@@ -121,6 +148,9 @@ async function createCodexProfile() {
 
 function toggleCreateEditor() {
   createEditorOpen.value = !createEditorOpen.value
+  if (createEditorOpen.value && !newCodexConfigToml.value.trim() && !newCodexAuthJson.value.trim()) {
+    fillCreateTemplate()
+  }
 }
 
 async function selectCodexProfile(name: string) {
@@ -144,6 +174,14 @@ async function reloadSelectedCodexProfile() {
 
 async function saveSelectedCodexProfile() {
   if (!codexProfileContent.value) {
+    return
+  }
+  if (!codexProfileContent.value.name.trim()) {
+    ElMessage.error(t('launcher.codexLocal.errors.nameRequired'))
+    return
+  }
+  if (profileNameExists(codexProfileContent.value.name, codexProfileContent.value.originalName)) {
+    ElMessage.error(t('launcher.codexLocal.errors.nameExists'))
     return
   }
   try {
@@ -207,6 +245,18 @@ async function testCodexProfileConnection(name: string) {
     ElMessage.error(toErrorMessage(error))
   }
 }
+
+async function exportCodexProfile(name: string) {
+  try {
+    const path = await codexLocalConfigStore.exportProfile(name)
+    if (!path) {
+      return
+    }
+    ElMessage.success(t('launcher.codexLocal.messages.exported', { path }))
+  } catch (error) {
+    ElMessage.error(toErrorMessage(error))
+  }
+}
 </script>
 
 <template>
@@ -217,9 +267,17 @@ async function testCodexProfileConnection(name: string) {
           <p class="panel-kicker">{{ t('launcher.codexLocal.section') }}</p>
           <h3>{{ t('launcher.codexLocal.title') }}</h3>
         </div>
-        <el-button plain :disabled="codexContentBusy" @click="openCodexLocalDirectory">
-          {{ t('launcher.codexLocal.openDirectory') }}
-        </el-button>
+        <div class="codex-config-toolbar">
+          <el-button plain :disabled="codexContentBusy" @click="importCodexProfilesFromFile">
+            {{ t('launcher.codexLocal.importProfiles') }}
+          </el-button>
+          <el-button plain :disabled="codexContentBusy" @click="exportAllCodexProfiles">
+            {{ t('launcher.codexLocal.exportProfiles') }}
+          </el-button>
+          <el-button plain :disabled="codexContentBusy" @click="openCodexLocalDirectory">
+            {{ t('launcher.codexLocal.openDirectory') }}
+          </el-button>
+        </div>
       </div>
       <div class="panel__body codex-config-body">
         <p class="muted">{{ t('launcher.codexLocal.lead') }}</p>
@@ -237,35 +295,16 @@ async function testCodexProfileConnection(name: string) {
             <strong>{{ t('launcher.codexLocal.lastBackup') }}</strong>
             <span>{{ lastCodexBackup ? formatDateTime(lastCodexBackup.createdAt) : t('common.notAvailable') }}</span>
           </div>
-        </div>
-
-        <div class="codex-config-list-head">
-          <strong>{{ t('launcher.codexLocal.currentFiles') }}</strong>
-          <span class="muted">{{ t('launcher.codexLocal.importLabel') }}</span>
-        </div>
-        <div class="codex-config-file-list">
-          <div class="codex-config-file-pill" :data-ready="codexLocalConfigStore.snapshot.currentConfigExists">
-            <strong>{{ t('launcher.codexLocal.configToml') }}</strong>
-            <span>{{ codexLocalConfigStore.snapshot.currentConfigExists ? t('launcher.codexLocal.ready') : t('launcher.codexLocal.missing') }}</span>
+          <div class="codex-config-detail-item">
+            <strong>{{ t('launcher.codexLocal.currentFiles') }}</strong>
+            <span>
+              {{
+                codexLocalConfigStore.snapshot.currentConfigExists && codexLocalConfigStore.snapshot.currentAuthExists
+                  ? t('launcher.codexLocal.ready')
+                  : t('launcher.codexLocal.missing')
+              }}
+            </span>
           </div>
-          <div class="codex-config-file-pill" :data-ready="codexLocalConfigStore.snapshot.currentAuthExists">
-            <strong>{{ t('launcher.codexLocal.authJson') }}</strong>
-            <span>{{ codexLocalConfigStore.snapshot.currentAuthExists ? t('launcher.codexLocal.ready') : t('launcher.codexLocal.missing') }}</span>
-          </div>
-        </div>
-        <div class="codex-config-import">
-          <el-input
-            v-model="codexImportName"
-            :placeholder="t('launcher.codexLocal.importPlaceholder')"
-            :disabled="codexContentBusy"
-          />
-          <el-button
-            type="primary"
-            :disabled="codexContentBusy || !codexLocalConfigStore.snapshot.currentConfigExists || !codexLocalConfigStore.snapshot.currentAuthExists"
-            @click="importCurrentCodexProfile"
-          >
-            {{ t('launcher.codexLocal.importCurrent') }}
-          </el-button>
         </div>
 
         <div class="codex-config-editor codex-config-editor--create">
@@ -277,6 +316,14 @@ async function testCodexProfileConnection(name: string) {
             <div class="codex-config-editor__actions">
               <el-button plain :disabled="codexContentBusy" @click="toggleCreateEditor">
                 {{ createEditorOpen ? t('launcher.codexLocal.createCollapse') : t('launcher.codexLocal.createExpand') }}
+              </el-button>
+              <el-button
+                v-if="createEditorOpen"
+                plain
+                :disabled="codexContentBusy"
+                @click="fillCreateTemplate"
+              >
+                {{ t('launcher.codexLocal.fillTemplate') }}
               </el-button>
               <el-button
                 v-if="createEditorOpen"
@@ -367,6 +414,9 @@ async function testCodexProfileConnection(name: string) {
               >
                 {{ t('launcher.codexLocal.testConnection') }}
               </el-button>
+              <el-button plain :disabled="codexContentBusy" @click="exportCodexProfile(profile.name)">
+                {{ t('launcher.codexLocal.exportProfile') }}
+              </el-button>
               <el-button
                 plain
                 :disabled="profile.name === codexLocalConfigStore.activeProfile || codexContentBusy || !profile.hasConfigToml || !profile.hasAuthJson"
@@ -405,26 +455,36 @@ async function testCodexProfileConnection(name: string) {
             </div>
           </div>
           <p class="muted">{{ t('launcher.codexLocal.editorHint') }}</p>
-          <div v-if="codexProfileContent" class="codex-config-editor__grid">
-            <div class="codex-config-editor__field">
-              <span class="codex-config-label">{{ t('launcher.codexLocal.configToml') }}</span>
+          <div v-if="codexProfileContent" class="codex-config-editor__content">
+            <div class="codex-config-editor__field codex-config-editor__field--name">
+              <span class="codex-config-label">{{ t('launcher.codexLocal.profileName') }}</span>
               <el-input
-                v-model="codexProfileContent.configToml"
-                type="textarea"
-                :rows="14"
-                resize="vertical"
+                v-model="codexProfileContent.name"
+                :placeholder="t('launcher.codexLocal.editNamePlaceholder')"
                 :disabled="codexLocalConfigStore.contentLoading || codexLocalConfigStore.contentSaving"
               />
             </div>
-            <div class="codex-config-editor__field">
-              <span class="codex-config-label">{{ t('launcher.codexLocal.authJson') }}</span>
-              <el-input
-                v-model="codexProfileContent.authJson"
-                type="textarea"
-                :rows="14"
-                resize="vertical"
-                :disabled="codexLocalConfigStore.contentLoading || codexLocalConfigStore.contentSaving"
-              />
+            <div class="codex-config-editor__grid">
+              <div class="codex-config-editor__field">
+                <span class="codex-config-label">{{ t('launcher.codexLocal.configToml') }}</span>
+                <el-input
+                  v-model="codexProfileContent.configToml"
+                  type="textarea"
+                  :rows="14"
+                  resize="vertical"
+                  :disabled="codexLocalConfigStore.contentLoading || codexLocalConfigStore.contentSaving"
+                />
+              </div>
+              <div class="codex-config-editor__field">
+                <span class="codex-config-label">{{ t('launcher.codexLocal.authJson') }}</span>
+                <el-input
+                  v-model="codexProfileContent.authJson"
+                  type="textarea"
+                  :rows="14"
+                  resize="vertical"
+                  :disabled="codexLocalConfigStore.contentLoading || codexLocalConfigStore.contentSaving"
+                />
+              </div>
             </div>
           </div>
           <div v-else class="codex-config-empty">
@@ -458,6 +518,12 @@ async function testCodexProfileConnection(name: string) {
   gap: 0.85rem;
 }
 
+.codex-config-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
 .codex-config-summary-grid {
   display: grid;
   gap: 0.52rem 0.7rem;
@@ -484,42 +550,9 @@ async function testCodexProfileConnection(name: string) {
   word-break: break-word;
 }
 
-.codex-config-file-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.7rem;
-}
-
-.codex-config-file-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.7rem;
-  padding: 0.65rem 0.85rem;
-  border-radius: 16px;
-  background: rgba(247, 241, 231, 0.78);
-  border: 1px solid rgba(69, 60, 42, 0.08);
-}
-
-.codex-config-file-pill strong,
 .codex-config-list-head strong,
 .codex-config-profile__title strong {
   color: rgba(69, 60, 42, 0.9);
-}
-
-.codex-config-file-pill span {
-  font-size: 0.85rem;
-  font-weight: 700;
-  color: #8c3d2f;
-}
-
-.codex-config-file-pill[data-ready='true'] span {
-  color: #185f4a;
-}
-
-.codex-config-import {
-  display: grid;
-  gap: 0.7rem;
-  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .codex-config-list-head {
@@ -596,7 +629,7 @@ async function testCodexProfileConnection(name: string) {
 
 .codex-config-profile__actions--row {
   display: grid;
-  grid-template-columns: 88px 110px 136px 72px;
+  grid-template-columns: 88px 110px 96px 136px 72px;
   justify-content: end;
   align-items: center;
   gap: 0.65rem;
@@ -629,6 +662,11 @@ async function testCodexProfileConnection(name: string) {
   gap: 0.18rem;
 }
 
+.codex-config-editor__content {
+  display: grid;
+  gap: 0.8rem;
+}
+
 .codex-config-editor__actions {
   display: flex;
   gap: 0.6rem;
@@ -643,6 +681,10 @@ async function testCodexProfileConnection(name: string) {
 .codex-config-editor__field {
   display: grid;
   gap: 0.45rem;
+}
+
+.codex-config-editor__field--name {
+  max-width: 420px;
 }
 
 .codex-config-label {
@@ -666,10 +708,6 @@ async function testCodexProfileConnection(name: string) {
 }
 
 @media (max-width: 920px) {
-  .codex-config-import {
-    grid-template-columns: 1fr;
-  }
-
   .codex-config-profile__actions,
   .codex-config-list-head {
     flex-wrap: wrap;

@@ -81,6 +81,7 @@ type LauncherUpdateInfo struct {
 	ReleaseURL     string `json:"releaseUrl"`
 	CheckedAt      string `json:"checkedAt"`
 	Message        string `json:"message"`
+	CheckSource    string `json:"checkSource"`
 }
 
 type LauncherStatusSnapshot struct {
@@ -113,9 +114,10 @@ type CodexLocalConfigSwitchInput struct {
 }
 
 type CodexLocalConfigSaveInput struct {
-	Name       string `json:"name"`
-	ConfigToml string `json:"configToml"`
-	AuthJSON   string `json:"authJson"`
+	Name         string `json:"name"`
+	OriginalName string `json:"originalName"`
+	ConfigToml   string `json:"configToml"`
+	AuthJSON     string `json:"authJson"`
 }
 
 type CodexLocalConfigValidationResult struct {
@@ -166,10 +168,17 @@ type CodexLocalConfigSnapshot struct {
 }
 
 type CodexLocalConfigProfileContent struct {
-	Name       string `json:"name"`
-	ConfigToml string `json:"configToml"`
-	AuthJSON   string `json:"authJson"`
-	UpdatedAt  string `json:"updatedAt"`
+	Name         string `json:"name"`
+	OriginalName string `json:"originalName"`
+	ConfigToml   string `json:"configToml"`
+	AuthJSON     string `json:"authJson"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+type CodexLocalConfigTransferResult struct {
+	Path  string   `json:"path"`
+	Count int      `json:"count"`
+	Names []string `json:"names"`
 }
 
 type SchedulerStatus struct {

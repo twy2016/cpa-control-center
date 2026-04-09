@@ -124,6 +124,22 @@ func (b *Backend) SaveCodexLocalConfigProfileContent(input CodexLocalConfigSaveI
 	return newCodexLocalConfigManager(b.store).SaveProfileContent(input)
 }
 
+func (b *Backend) ImportCodexLocalConfigProfileFromFile(path string) (string, error) {
+	return newCodexLocalConfigManager(b.store).ImportProfileFromFile(path)
+}
+
+func (b *Backend) ExportCodexLocalConfigProfileToFile(name string, path string) (string, error) {
+	return newCodexLocalConfigManager(b.store).ExportProfileToFile(name, path)
+}
+
+func (b *Backend) ImportCodexLocalConfigProfilesFromFile(path string) (CodexLocalConfigTransferResult, error) {
+	return newCodexLocalConfigManager(b.store).ImportProfilesFromFile(path)
+}
+
+func (b *Backend) ExportCodexLocalConfigProfilesToFile(path string) (CodexLocalConfigTransferResult, error) {
+	return newCodexLocalConfigManager(b.store).ExportAllProfilesToFile(path)
+}
+
 func (b *Backend) TestCodexLocalConfigProfileContent(input CodexLocalConfigSaveInput) (CodexLocalConfigValidationResult, error) {
 	return newCodexLocalConfigManager(b.store).TestProfileContent(input), nil
 }

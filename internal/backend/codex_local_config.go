@@ -20,12 +20,15 @@ import (
 )
 
 const (
-	codexLocalConfigRootDirName     = "codex-local"
-	codexLocalConfigProfilesDirName = "profiles"
-	codexLocalConfigBackupsDirName  = "backups"
-	codexLocalConfigIndexFileName   = "index.json"
-	codexConfigTomlFileName         = "config.toml"
-	codexAuthJSONFileName           = "auth.json"
+	codexLocalConfigRootDirName      = "codex-local"
+	codexLocalConfigProfilesDirName  = "profiles"
+	codexLocalConfigBackupsDirName   = "backups"
+	codexLocalConfigIndexFileName    = "index.json"
+	codexConfigTomlFileName          = "config.toml"
+	codexAuthJSONFileName            = "auth.json"
+	codexLocalConfigTransferKind     = "codex-local-profile"
+	codexLocalConfigTransferListKind = "codex-local-profiles"
+	codexLocalConfigTransferVersion  = 1
 )
 
 var codexLocalConfigSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
@@ -58,6 +61,22 @@ type codexLocalParsedProvider struct {
 	Name    string `toml:"name"`
 	BaseURL string `toml:"base_url"`
 	WireAPI string `toml:"wire_api"`
+}
+
+type codexLocalConfigTransferFile struct {
+	Kind       string                            `json:"kind"`
+	Version    int                               `json:"version"`
+	Name       string                            `json:"name"`
+	ConfigToml string                            `json:"configToml"`
+	AuthJSON   string                            `json:"authJson"`
+	Profiles   []codexLocalConfigTransferProfile `json:"profiles"`
+	ExportedAt string                            `json:"exportedAt"`
+}
+
+type codexLocalConfigTransferProfile struct {
+	Name       string `json:"name"`
+	ConfigToml string `json:"configToml"`
+	AuthJSON   string `json:"authJson"`
 }
 
 func newCodexLocalConfigManager(store *Store) *codexLocalConfigManager {
@@ -202,10 +221,11 @@ func (m *codexLocalConfigManager) ProfileContent(name string) (CodexLocalConfigP
 	}
 
 	return CodexLocalConfigProfileContent{
-		Name:       profile.Name,
-		ConfigToml: string(configBytes),
-		AuthJSON:   string(authBytes),
-		UpdatedAt:  profile.UpdatedAt,
+		Name:         profile.Name,
+		OriginalName: profile.Name,
+		ConfigToml:   string(configBytes),
+		AuthJSON:     string(authBytes),
+		UpdatedAt:    profile.UpdatedAt,
 	}, nil
 }
 
@@ -285,17 +305,29 @@ func (m *codexLocalConfigManager) SaveProfileContent(input CodexLocalConfigSaveI
 	if name == "" {
 		return CodexLocalConfigProfileContent{}, errors.New("供应商名称不能为空")
 	}
+	originalName := strings.TrimSpace(input.OriginalName)
+	if originalName == "" {
+		originalName = name
+	}
 
 	index, err := m.loadIndex()
 	if err != nil {
 		return CodexLocalConfigProfileContent{}, err
 	}
-	targetIndex, target := findCodexLocalConfigProfile(index.Profiles, name)
+	targetIndex, target := findCodexLocalConfigProfile(index.Profiles, originalName)
 	if err := m.ensureStorageLayout(); err != nil {
 		return CodexLocalConfigProfileContent{}, err
 	}
+	wasActive := strings.EqualFold(strings.TrimSpace(index.ActiveProfileName), originalName)
+
+	if existingIndex, existing := findCodexLocalConfigProfile(index.Profiles, name); existing != nil && existingIndex != targetIndex {
+		return CodexLocalConfigProfileContent{}, fmt.Errorf("供应商配置 %q 已存在", name)
+	}
 
 	if target == nil {
+		if originalName != name {
+			return CodexLocalConfigProfileContent{}, fmt.Errorf("找不到供应商配置 %q", originalName)
+		}
 		now := nowISO()
 		dirName := codexLocalConfigDirectoryName(name)
 		profileDir, err := m.profileDir(dirName)
@@ -314,6 +346,10 @@ func (m *codexLocalConfigManager) SaveProfileContent(input CodexLocalConfigSaveI
 		targetIndex = len(index.Profiles) - 1
 		target = &index.Profiles[targetIndex]
 	}
+	index.Profiles[targetIndex].Name = name
+	if wasActive {
+		index.ActiveProfileName = name
+	}
 
 	profileDir, err := m.profileDir(target.DirName)
 	if err != nil {
@@ -331,7 +367,7 @@ func (m *codexLocalConfigManager) SaveProfileContent(input CodexLocalConfigSaveI
 		return CodexLocalConfigProfileContent{}, err
 	}
 
-	if strings.EqualFold(strings.TrimSpace(index.ActiveProfileName), name) {
+	if wasActive {
 		if err := ensureDir(m.defaultDirectory); err != nil {
 			return CodexLocalConfigProfileContent{}, err
 		}
@@ -352,10 +388,166 @@ func (m *codexLocalConfigManager) SaveProfileContent(input CodexLocalConfigSaveI
 		return CodexLocalConfigProfileContent{}, err
 	}
 	return CodexLocalConfigProfileContent{
-		Name:       target.Name,
-		ConfigToml: input.ConfigToml,
-		AuthJSON:   input.AuthJSON,
-		UpdatedAt:  now,
+		Name:         name,
+		OriginalName: name,
+		ConfigToml:   input.ConfigToml,
+		AuthJSON:     input.AuthJSON,
+		UpdatedAt:    now,
+	}, nil
+}
+
+func (m *codexLocalConfigManager) ImportProfileFromFile(path string) (string, error) {
+	result, err := m.ImportProfilesFromFile(path)
+	if err != nil {
+		return "", err
+	}
+	if result.Count != 1 {
+		return "", fmt.Errorf("导入文件包含 %d 个供应商配置，请使用整包导入", result.Count)
+	}
+	return result.Names[0], nil
+}
+
+func (m *codexLocalConfigManager) ExportProfileToFile(name string, path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("导出路径不能为空")
+	}
+
+	content, err := m.ProfileContent(name)
+	if err != nil {
+		return "", err
+	}
+
+	payload := codexLocalConfigTransferFile{
+		Kind:       codexLocalConfigTransferKind,
+		Version:    codexLocalConfigTransferVersion,
+		Name:       content.Name,
+		ConfigToml: content.ConfigToml,
+		AuthJSON:   content.AuthJSON,
+		ExportedAt: nowISO(),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	parentDir := filepath.Dir(path)
+	if strings.TrimSpace(parentDir) != "" {
+		if err := ensureDir(parentDir); err != nil {
+			return "", err
+		}
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (m *codexLocalConfigManager) ImportProfilesFromFile(path string) (CodexLocalConfigTransferResult, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return CodexLocalConfigTransferResult{}, errors.New("导入路径不能为空")
+	}
+
+	payload, err := m.loadTransferFile(path)
+	if err != nil {
+		return CodexLocalConfigTransferResult{}, err
+	}
+	profiles, err := codexLocalConfigTransferProfiles(payload)
+	if err != nil {
+		return CodexLocalConfigTransferResult{}, err
+	}
+
+	seen := make(map[string]struct{}, len(profiles))
+	importedNames := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		name := strings.TrimSpace(profile.Name)
+		if name == "" {
+			return CodexLocalConfigTransferResult{}, errors.New("导入文件缺少供应商名称")
+		}
+		normalizedName := strings.ToLower(name)
+		if _, exists := seen[normalizedName]; exists {
+			return CodexLocalConfigTransferResult{}, fmt.Errorf("导入文件存在重复供应商名称 %q", name)
+		}
+		seen[normalizedName] = struct{}{}
+
+		validation := validateCodexLocalConfigContent(name, profile.ConfigToml, profile.AuthJSON)
+		if !validation.OK {
+			return CodexLocalConfigTransferResult{}, errors.New(validation.Message)
+		}
+
+		saved, err := m.SaveProfileContent(CodexLocalConfigSaveInput{
+			Name:       name,
+			ConfigToml: profile.ConfigToml,
+			AuthJSON:   profile.AuthJSON,
+		})
+		if err != nil {
+			return CodexLocalConfigTransferResult{}, err
+		}
+		importedNames = append(importedNames, saved.Name)
+	}
+
+	return CodexLocalConfigTransferResult{
+		Path:  path,
+		Count: len(importedNames),
+		Names: importedNames,
+	}, nil
+}
+
+func (m *codexLocalConfigManager) ExportAllProfilesToFile(path string) (CodexLocalConfigTransferResult, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return CodexLocalConfigTransferResult{}, errors.New("导出路径不能为空")
+	}
+
+	snapshot, err := m.Snapshot()
+	if err != nil {
+		return CodexLocalConfigTransferResult{}, err
+	}
+	if len(snapshot.Profiles) == 0 {
+		return CodexLocalConfigTransferResult{}, errors.New("当前没有可导出的供应商配置")
+	}
+
+	profiles := make([]codexLocalConfigTransferProfile, 0, len(snapshot.Profiles))
+	names := make([]string, 0, len(snapshot.Profiles))
+	for _, profile := range snapshot.Profiles {
+		content, err := m.ProfileContent(profile.Name)
+		if err != nil {
+			return CodexLocalConfigTransferResult{}, err
+		}
+		profiles = append(profiles, codexLocalConfigTransferProfile{
+			Name:       content.Name,
+			ConfigToml: content.ConfigToml,
+			AuthJSON:   content.AuthJSON,
+		})
+		names = append(names, content.Name)
+	}
+
+	payload := codexLocalConfigTransferFile{
+		Kind:       codexLocalConfigTransferListKind,
+		Version:    codexLocalConfigTransferVersion,
+		Profiles:   profiles,
+		ExportedAt: nowISO(),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return CodexLocalConfigTransferResult{}, err
+	}
+
+	parentDir := filepath.Dir(path)
+	if strings.TrimSpace(parentDir) != "" {
+		if err := ensureDir(parentDir); err != nil {
+			return CodexLocalConfigTransferResult{}, err
+		}
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+		return CodexLocalConfigTransferResult{}, err
+	}
+
+	return CodexLocalConfigTransferResult{
+		Path:  path,
+		Count: len(names),
+		Names: names,
 	}, nil
 }
 
@@ -548,6 +740,43 @@ func codexLocalConfigDirectoryName(name string) string {
 	}
 	hash := sha1.Sum([]byte(normalized))
 	return fmt.Sprintf("%s-%s", slug, hex.EncodeToString(hash[:4]))
+}
+
+func (m *codexLocalConfigManager) loadTransferFile(path string) (codexLocalConfigTransferFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return codexLocalConfigTransferFile{}, err
+	}
+
+	var payload codexLocalConfigTransferFile
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return codexLocalConfigTransferFile{}, fmt.Errorf("导入文件不是合法 JSON：%w", err)
+	}
+	if payload.Kind != "" && payload.Kind != codexLocalConfigTransferKind && payload.Kind != codexLocalConfigTransferListKind {
+		return codexLocalConfigTransferFile{}, fmt.Errorf("不支持的配置文件类型：%s", payload.Kind)
+	}
+	if payload.Version != 0 && payload.Version != codexLocalConfigTransferVersion {
+		return codexLocalConfigTransferFile{}, fmt.Errorf("不支持的配置文件版本：%d", payload.Version)
+	}
+	return payload, nil
+}
+
+func codexLocalConfigTransferProfiles(payload codexLocalConfigTransferFile) ([]codexLocalConfigTransferProfile, error) {
+	if len(payload.Profiles) > 0 {
+		return payload.Profiles, nil
+	}
+
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		return nil, errors.New("导入文件中没有可用的供应商配置")
+	}
+	return []codexLocalConfigTransferProfile{
+		{
+			Name:       payload.Name,
+			ConfigToml: payload.ConfigToml,
+			AuthJSON:   payload.AuthJSON,
+		},
+	}, nil
 }
 
 func findCodexLocalConfigProfile(profiles []codexLocalConfigIndexProfile, name string) (int, *codexLocalConfigIndexProfile) {

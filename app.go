@@ -152,6 +152,105 @@ func (a *App) SaveCodexLocalConfigProfileContent(input backend.CodexLocalConfigS
 	return service.SaveCodexLocalConfigProfileContent(input)
 }
 
+func (a *App) ImportCodexLocalConfigProfile() (string, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择要导入的 Codex 配置文件",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON 配置包", Pattern: "*.json"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	service, err := a.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	return service.ImportCodexLocalConfigProfileFromFile(path)
+}
+
+func (a *App) ExportCodexLocalConfigProfile(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("供应商名称不能为空")
+	}
+
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "导出 Codex 配置文件",
+		DefaultFilename: defaultCodexLocalConfigExportFileName(name),
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON 配置包", Pattern: "*.json"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	service, err := a.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	return service.ExportCodexLocalConfigProfileToFile(name, path)
+}
+
+func (a *App) ImportCodexLocalConfigProfiles() (backend.CodexLocalConfigTransferResult, error) {
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择要导入的 Codex 配置包",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON 配置包", Pattern: "*.json"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return backend.CodexLocalConfigTransferResult{}, err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return backend.CodexLocalConfigTransferResult{}, nil
+	}
+
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigTransferResult{}, err
+	}
+	return service.ImportCodexLocalConfigProfilesFromFile(path)
+}
+
+func (a *App) ExportCodexLocalConfigProfiles() (backend.CodexLocalConfigTransferResult, error) {
+	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "导出全部 Codex 配置",
+		DefaultFilename: "codex-profiles.bundle.json",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON 配置包", Pattern: "*.json"},
+			{DisplayName: "所有文件", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return backend.CodexLocalConfigTransferResult{}, err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return backend.CodexLocalConfigTransferResult{}, nil
+	}
+
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigTransferResult{}, err
+	}
+	return service.ExportCodexLocalConfigProfilesToFile(path)
+}
+
 func (a *App) TestCodexLocalConfigProfileContent(input backend.CodexLocalConfigSaveInput) (backend.CodexLocalConfigValidationResult, error) {
 	service, err := a.ensureBackend()
 	if err != nil {
@@ -568,6 +667,15 @@ func openPathWithSystem(path string) error {
 	target := filepath.Clean(path)
 	cmd := exec.Command("cmd", "/c", "start", "", target)
 	return cmd.Start()
+}
+
+func defaultCodexLocalConfigExportFileName(name string) string {
+	replacer := strings.NewReplacer("\\", "-", "/", "-", ":", "-", "*", "-", "?", "", "\"", "", "<", "", ">", "", "|", "-")
+	cleaned := strings.TrimSpace(replacer.Replace(name))
+	if cleaned == "" {
+		cleaned = "codex-profile"
+	}
+	return cleaned + ".codex-profile.json"
 }
 
 func (a *App) shouldMinimizeToTray() bool {

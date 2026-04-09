@@ -1,8 +1,12 @@
 import { defineStore } from 'pinia'
 import {
   DeleteCodexLocalConfigProfile,
+  ExportCodexLocalConfigProfile,
+  ExportCodexLocalConfigProfiles,
   GetCodexLocalConfigSnapshot,
   GetCodexLocalConfigProfileContent,
+  ImportCodexLocalConfigProfile,
+  ImportCodexLocalConfigProfiles,
   ImportCurrentCodexLocalConfig,
   OpenCodexLocalConfigDirectory,
   SaveCodexLocalConfigProfileContent,
@@ -15,6 +19,7 @@ import type {
   CodexLocalConfigConnectionTestResult,
   CodexLocalConfigProfileContent,
   CodexLocalConfigSnapshot,
+  CodexLocalConfigTransferResult,
   CodexLocalConfigValidationResult,
 } from '@/types'
 
@@ -47,8 +52,33 @@ function createEmptySnapshot(): CodexLocalConfigSnapshot {
 function createEmptyProfileContent(): CodexLocalConfigProfileContent {
   return {
     name: '',
+    originalName: '',
     configToml: '',
     authJson: '',
+    updatedAt: '',
+  }
+}
+
+function createCodexProfileTemplate(name = ''): CodexLocalConfigProfileContent {
+  return {
+    name,
+    originalName: '',
+    configToml: [
+      'model = "gpt-5"',
+      'model_provider = "openai"',
+      '',
+      '[model_providers.openai]',
+      'name = "openai"',
+      'base_url = "https://api.openai.com/v1"',
+      'wire_api = "responses"',
+      '',
+    ].join('\n'),
+    authJson: [
+      '{',
+      '  "OPENAI_API_KEY": "sk-your-api-key"',
+      '}',
+      '',
+    ].join('\n'),
     updatedAt: '',
   }
 }
@@ -139,6 +169,68 @@ export const useCodexLocalConfigStore = defineStore('codexLocalConfigStore', {
         this.busy = false
       }
     },
+    createProfileTemplate(name = '') {
+      return createCodexProfileTemplate(name)
+    },
+    async importProfileFromFile() {
+      this.busy = true
+      try {
+        const name = (await ImportCodexLocalConfigProfile())?.trim() || ''
+        if (!name) {
+          return ''
+        }
+        await this.loadSnapshot()
+        this.selectedProfileName = name
+        await this.loadProfileContent(name)
+        return name
+      } finally {
+        this.busy = false
+      }
+    },
+    async importProfilesFromFile() {
+      this.busy = true
+      try {
+        const result = await ImportCodexLocalConfigProfiles()
+        const typed = {
+          path: result?.path || '',
+          count: result?.count || 0,
+          names: Array.isArray(result?.names) ? result.names : [],
+        } as CodexLocalConfigTransferResult
+        if (!typed.count) {
+          return typed
+        }
+        await this.loadSnapshot()
+        const selectedName = typed.names[typed.names.length - 1] || ''
+        if (selectedName) {
+          this.selectedProfileName = selectedName
+          await this.loadProfileContent(selectedName)
+        }
+        return typed
+      } finally {
+        this.busy = false
+      }
+    },
+    async exportProfile(name: string) {
+      this.busy = true
+      try {
+        return (await ExportCodexLocalConfigProfile(name))?.trim() || ''
+      } finally {
+        this.busy = false
+      }
+    },
+    async exportAllProfiles() {
+      this.busy = true
+      try {
+        const result = await ExportCodexLocalConfigProfiles()
+        return {
+          path: result?.path || '',
+          count: result?.count || 0,
+          names: Array.isArray(result?.names) ? result.names : [],
+        } as CodexLocalConfigTransferResult
+      } finally {
+        this.busy = false
+      }
+    },
     async switchProfile(name: string) {
       this.busy = true
       try {
@@ -159,6 +251,7 @@ export const useCodexLocalConfigStore = defineStore('codexLocalConfigStore', {
       try {
         const saved = await SaveCodexLocalConfigProfileContent(new backendModels.CodexLocalConfigSaveInput({
           name: this.profileContent.name,
+          originalName: this.profileContent.originalName,
           configToml: this.profileContent.configToml,
           authJson: this.profileContent.authJson,
         }))
@@ -166,6 +259,7 @@ export const useCodexLocalConfigStore = defineStore('codexLocalConfigStore', {
           ...createEmptyProfileContent(),
           ...(saved as unknown as Partial<CodexLocalConfigProfileContent>),
         }
+        this.selectedProfileName = this.profileContent.name
         await this.loadSnapshot()
         return this.profileContent
       } finally {
@@ -177,6 +271,7 @@ export const useCodexLocalConfigStore = defineStore('codexLocalConfigStore', {
       try {
         const saved = await SaveCodexLocalConfigProfileContent(new backendModels.CodexLocalConfigSaveInput({
           name,
+          originalName: '',
           configToml,
           authJson,
         }))

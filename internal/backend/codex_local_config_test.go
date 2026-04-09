@@ -228,6 +228,272 @@ func TestCodexLocalConfigImportRejectsMissingFilesAndDuplicates(t *testing.T) {
 	}
 }
 
+func TestCodexLocalConfigExportAndImportProfileFile(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	manager.defaultDirectory = filepath.Join(t.TempDir(), ".codex")
+
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:       "OpenAI",
+		ConfigToml: "model = 'gpt-5'\nmodel_provider = 'openai'\n\n[model_providers.openai]\nname = 'openai'\nbase_url = 'https://api.openai.com/v1'\nwire_api = 'responses'\n",
+		AuthJSON:   "{\"OPENAI_API_KEY\":\"test-key\"}\n",
+	}); err != nil {
+		t.Fatalf("SaveProfileContent OpenAI: %v", err)
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "openai.codex-profile.json")
+	savedPath, err := manager.ExportProfileToFile("OpenAI", exportPath)
+	if err != nil {
+		t.Fatalf("ExportProfileToFile: %v", err)
+	}
+	if savedPath != exportPath {
+		t.Fatalf("unexpected export path: %q", savedPath)
+	}
+
+	exportBytes, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("ReadFile exportPath: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(exportBytes, &payload); err != nil {
+		t.Fatalf("json.Unmarshal export payload: %v", err)
+	}
+	if payload["kind"] != codexLocalConfigTransferKind {
+		t.Fatalf("unexpected export kind: %+v", payload)
+	}
+	if int(payload["version"].(float64)) != codexLocalConfigTransferVersion {
+		t.Fatalf("unexpected export version: %+v", payload)
+	}
+	if payload["name"] != "OpenAI" {
+		t.Fatalf("unexpected export payload name: %+v", payload)
+	}
+
+	importStore, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore importStore: %v", err)
+	}
+	defer importStore.Close()
+
+	importManager := newCodexLocalConfigManager(importStore)
+	importManager.defaultDirectory = filepath.Join(t.TempDir(), ".codex-import")
+
+	importedName, err := importManager.ImportProfileFromFile(exportPath)
+	if err != nil {
+		t.Fatalf("ImportProfileFromFile: %v", err)
+	}
+	if importedName != "OpenAI" {
+		t.Fatalf("unexpected imported profile name: %q", importedName)
+	}
+
+	importedContent, err := importManager.ProfileContent("OpenAI")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenAI: %v", err)
+	}
+	if importedContent.ConfigToml == "" || importedContent.AuthJSON == "" {
+		t.Fatalf("expected imported content to be populated, got %+v", importedContent)
+	}
+	if importedContent.ConfigToml != "model = 'gpt-5'\nmodel_provider = 'openai'\n\n[model_providers.openai]\nname = 'openai'\nbase_url = 'https://api.openai.com/v1'\nwire_api = 'responses'\n" {
+		t.Fatalf("unexpected imported config.toml: %q", importedContent.ConfigToml)
+	}
+	if importedContent.AuthJSON != "{\"OPENAI_API_KEY\":\"test-key\"}\n" {
+		t.Fatalf("unexpected imported auth.json: %q", importedContent.AuthJSON)
+	}
+}
+
+func TestCodexLocalConfigImportProfileFileRejectsInvalidContent(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	importPath := filepath.Join(t.TempDir(), "broken.codex-profile.json")
+	if err := os.WriteFile(importPath, []byte("{\n  \"kind\": \"codex-local-profile\",\n  \"version\": 1,\n  \"name\": \"Broken\",\n  \"configToml\": \"model = [\",\n  \"authJson\": \"{\\\"OPENAI_API_KEY\\\":1\"\n}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile importPath: %v", err)
+	}
+
+	if _, err := manager.ImportProfileFromFile(importPath); err == nil {
+		t.Fatal("expected invalid imported content to be rejected")
+	}
+}
+
+func TestCodexLocalConfigExportAndImportProfilesBundle(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	manager.defaultDirectory = filepath.Join(t.TempDir(), ".codex")
+
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:       "OpenAI",
+		ConfigToml: "model = 'gpt-5'\n",
+		AuthJSON:   "{\"api_key\":\"openai-key\"}\n",
+	}); err != nil {
+		t.Fatalf("SaveProfileContent OpenAI: %v", err)
+	}
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:       "OpenRouter",
+		ConfigToml: "model = 'openrouter/gpt-5'\n",
+		AuthJSON:   "{\"api_key\":\"openrouter-key\"}\n",
+	}); err != nil {
+		t.Fatalf("SaveProfileContent OpenRouter: %v", err)
+	}
+
+	exportPath := filepath.Join(t.TempDir(), "codex-profiles.bundle.json")
+	result, err := manager.ExportAllProfilesToFile(exportPath)
+	if err != nil {
+		t.Fatalf("ExportAllProfilesToFile: %v", err)
+	}
+	if result.Count != 2 || result.Path != exportPath {
+		t.Fatalf("unexpected bundle export result: %+v", result)
+	}
+
+	exportBytes, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("ReadFile exportPath: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(exportBytes, &payload); err != nil {
+		t.Fatalf("json.Unmarshal bundle export payload: %v", err)
+	}
+	if payload["kind"] != codexLocalConfigTransferListKind {
+		t.Fatalf("unexpected bundle export kind: %+v", payload)
+	}
+	profilesValue, ok := payload["profiles"].([]any)
+	if !ok || len(profilesValue) != 2 {
+		t.Fatalf("unexpected bundle export profiles: %+v", payload)
+	}
+
+	importStore, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore importStore: %v", err)
+	}
+	defer importStore.Close()
+
+	importManager := newCodexLocalConfigManager(importStore)
+	importResult, err := importManager.ImportProfilesFromFile(exportPath)
+	if err != nil {
+		t.Fatalf("ImportProfilesFromFile: %v", err)
+	}
+	if importResult.Count != 2 {
+		t.Fatalf("unexpected bundle import result: %+v", importResult)
+	}
+
+	snapshot, err := importManager.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot importManager: %v", err)
+	}
+	if len(snapshot.Profiles) != 2 {
+		t.Fatalf("expected two imported profiles, got %+v", snapshot.Profiles)
+	}
+}
+
+func TestCodexLocalConfigSaveProfileContentRenamesExistingProfile(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	manager.defaultDirectory = filepath.Join(t.TempDir(), ".codex")
+	if err := ensureDir(manager.defaultDirectory); err != nil {
+		t.Fatalf("ensureDir: %v", err)
+	}
+
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:       "OpenAI",
+		ConfigToml: "model = 'openai'\n",
+		AuthJSON:   "{\"api_key\":\"openai\"}\n",
+	}); err != nil {
+		t.Fatalf("SaveProfileContent OpenAI: %v", err)
+	}
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:       "OpenRouter",
+		ConfigToml: "model = 'openrouter'\n",
+		AuthJSON:   "{\"api_key\":\"router\"}\n",
+	}); err != nil {
+		t.Fatalf("SaveProfileContent OpenRouter: %v", err)
+	}
+	if _, err := manager.Switch(CodexLocalConfigSwitchInput{Name: "OpenAI"}); err != nil {
+		t.Fatalf("Switch OpenAI: %v", err)
+	}
+
+	saved, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:         "OpenAI Renamed",
+		OriginalName: "OpenAI",
+		ConfigToml:   "model = 'openai-renamed'\n",
+		AuthJSON:     "{\"api_key\":\"openai-renamed\"}\n",
+	})
+	if err != nil {
+		t.Fatalf("SaveProfileContent rename: %v", err)
+	}
+	if saved.Name != "OpenAI Renamed" || saved.OriginalName != "OpenAI Renamed" {
+		t.Fatalf("unexpected rename save result: %+v", saved)
+	}
+
+	snapshot, err := manager.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot after rename: %v", err)
+	}
+	if snapshot.ActiveProfileName != "OpenAI Renamed" {
+		t.Fatalf("expected renamed profile to remain active, got %+v", snapshot)
+	}
+	if len(snapshot.Profiles) != 2 {
+		t.Fatalf("expected two profiles after rename, got %+v", snapshot.Profiles)
+	}
+	for _, profile := range snapshot.Profiles {
+		if profile.Name == "OpenAI" {
+			t.Fatalf("old profile name should not remain after rename: %+v", snapshot.Profiles)
+		}
+	}
+
+	if _, err := manager.ProfileContent("OpenAI"); err == nil {
+		t.Fatal("expected old profile name lookup to fail after rename")
+	}
+	renamedContent, err := manager.ProfileContent("OpenAI Renamed")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenAI Renamed: %v", err)
+	}
+	if renamedContent.OriginalName != "OpenAI Renamed" {
+		t.Fatalf("unexpected renamed content metadata: %+v", renamedContent)
+	}
+
+	currentConfig, err := os.ReadFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName))
+	if err != nil {
+		t.Fatalf("ReadFile current config.toml: %v", err)
+	}
+	if string(currentConfig) != "model = 'openai-renamed'\n" {
+		t.Fatalf("expected renamed active profile to sync current config.toml, got %q", string(currentConfig))
+	}
+
+	if _, err := manager.SaveProfileContent(CodexLocalConfigSaveInput{
+		Name:         "OpenRouter",
+		OriginalName: "OpenAI Renamed",
+		ConfigToml:   "model = 'duplicate'\n",
+		AuthJSON:     "{\"api_key\":\"duplicate\"}\n",
+	}); err == nil {
+		t.Fatal("expected renaming to an existing supplier name to fail")
+	}
+}
+
 func TestCodexLocalConfigSaveProfileContentSyncsActiveProfile(t *testing.T) {
 	t.Parallel()
 
