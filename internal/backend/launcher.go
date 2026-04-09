@@ -37,6 +37,9 @@ const (
 	launcherProbeTimeout    = 2 * time.Second
 	launcherDownloadTimeout = 10 * time.Minute
 	defaultCPAListenPort    = 8317
+
+	launcherUpdateSourceStartup = "startup"
+	launcherUpdateSourceManual  = "manual"
 )
 
 type launcherService struct {
@@ -126,11 +129,13 @@ func (l *launcherService) runStartupActions() {
 	}
 
 	if settings.Launcher.CheckForUpdatesOnStartup && strings.TrimSpace(settings.Launcher.ExecutablePath) != "" {
-		go func() {
-			if _, err := l.checkForUpdate(settings, true); err != nil {
-				l.appendLog("warning", err.Error())
-			}
-		}()
+		update, updateErr := l.checkForUpdate(settings, true, launcherUpdateSourceStartup)
+		if updateErr != nil {
+			l.appendLog("warning", updateErr.Error())
+		} else if launcherStartupShouldBlockAutoStart(update) {
+			l.appendLog("info", update.Message)
+			return
+		}
 	}
 
 	if !settings.Launcher.AutoStartService {
@@ -419,7 +424,7 @@ func (l *launcherService) CheckForUpdate() (LauncherStatusSnapshot, error) {
 	if err != nil {
 		return LauncherStatusSnapshot{}, err
 	}
-	if _, err := l.checkForUpdate(settings, false); err != nil {
+	if _, err := l.checkForUpdate(settings, false, launcherUpdateSourceManual); err != nil {
 		return LauncherStatusSnapshot{}, err
 	}
 	snapshot, err := l.Refresh()
@@ -658,6 +663,10 @@ func (l *launcherService) currentUpdate(currentVersion string) LauncherUpdateInf
 	return update
 }
 
+func launcherStartupShouldBlockAutoStart(update LauncherUpdateInfo) bool {
+	return update.Available
+}
+
 func (l *launcherService) describeStatus(
 	locale string,
 	runtimeInfo *LauncherRuntimeInfo,
@@ -859,7 +868,7 @@ func (l *launcherService) waitForServiceReady(info LauncherRuntimeInfo, openMana
 	l.refreshAndEmit()
 }
 
-func (l *launcherService) checkForUpdate(settings AppSettings, silent bool) (LauncherUpdateInfo, error) {
+func (l *launcherService) checkForUpdate(settings AppSettings, silent bool, source string) (LauncherUpdateInfo, error) {
 	diagnostics, err := launcherProxyDiagnosticsFromSettings(settings.Launcher, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", strings.TrimSpace(stringOr(settings.Launcher.GitHubRepo, defaultLauncherRepo))))
 	if err != nil {
 		return LauncherUpdateInfo{}, err
@@ -872,6 +881,7 @@ func (l *launcherService) checkForUpdate(settings AppSettings, silent bool) (Lau
 	update := LauncherUpdateInfo{
 		CurrentVersion: strings.TrimSpace(settings.Launcher.LastInstalledVersion),
 		CheckedAt:      nowISO(),
+		CheckSource:    source,
 	}
 	if err != nil {
 		update.Message = err.Error()

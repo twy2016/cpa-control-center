@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onErrorCaptured, onMounted, onUnmounted, provide, ref, watch } from 'vue'
-import { ElConfigProvider, ElMessage, ElOption, ElSelect } from 'element-plus'
+import { ElConfigProvider, ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import type { Language } from 'element-plus/es/locale'
 import en from 'element-plus/es/locale/lang/en'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
@@ -15,7 +15,7 @@ import { useLauncherStore } from '@/stores/launcher'
 import { useQuotasStore } from '@/stores/quotas'
 import { useSettingsStore } from '@/stores/settings'
 import { useTasksStore } from '@/stores/tasks'
-import type { ViewKey } from '@/types'
+import type { LauncherUpdateInfo, ViewKey } from '@/types'
 import { useI18n } from 'vue-i18n'
 import { isSameServiceOrigin } from '@/utils/connection'
 import { formatDateTime } from '@/utils/format'
@@ -50,6 +50,8 @@ let debugListenersBound = false
 let viewportObserver: ResizeObserver | null = null
 let quotaAutoRefreshTimer: number | null = null
 let lastQuotaAutoRefreshKey = ''
+let lastHandledLauncherStartupUpdateKey = ''
+let launcherStartupUpdatePromptOpen = false
 
 const safeMinWidth = 1280
 const safeMinHeight = 720
@@ -279,6 +281,54 @@ function onDebugHotkey(event: KeyboardEvent) {
   }
 }
 
+function isDialogDismissed(error: unknown) {
+  const action = String(error)
+  return action === 'cancel' || action === 'close'
+}
+
+function launcherStartupUpdateKey(update: LauncherUpdateInfo) {
+  if (!update.available || update.checkSource !== 'startup' || !update.checkedAt) {
+    return ''
+  }
+  return `${update.checkSource}|${update.checkedAt}|${update.tagName}|${update.currentVersion}`
+}
+
+async function maybePromptLauncherStartupUpdate() {
+  const update = launcherStore.status.update
+  const promptKey = launcherStartupUpdateKey(update)
+  if (!promptKey || promptKey === lastHandledLauncherStartupUpdateKey || launcherStartupUpdatePromptOpen) {
+    return
+  }
+
+  lastHandledLauncherStartupUpdateKey = promptKey
+  launcherStartupUpdatePromptOpen = true
+  try {
+    await ElMessageBox.confirm(
+      t('launcher.dialogs.startupUpdateMessage', { version: update.tagName || t('common.notAvailable') }),
+      t('launcher.dialogs.startupUpdateTitle'),
+      {
+        confirmButtonText: t('launcher.applyUpdate'),
+        cancelButtonText: t('launcher.dialogs.cancel'),
+        customClass: 'cpa-message-box',
+        type: 'warning',
+      },
+    )
+    await launcherStore.updateCPA()
+    if (launcherStore.settings.autoStartService && launcherStore.canStart) {
+      await launcherStore.startService()
+      ElMessage.success(t('launcher.messages.updatedAndStarted'))
+      return
+    }
+    ElMessage.success(t('launcher.messages.updated'))
+  } catch (error) {
+    if (!isDialogDismissed(error)) {
+      ElMessage.error(toErrorMessage(error))
+    }
+  } finally {
+    launcherStartupUpdatePromptOpen = false
+  }
+}
+
 function bindDebugListeners() {
   if (debugListenersBound) {
     return
@@ -363,6 +413,7 @@ onMounted(async () => {
     settingsStore.initSchedulerBridge()
     launcherStore.initBridge()
     await launcherStore.loadStatus(true)
+    void maybePromptLauncherStartupUpdate()
     await settingsStore.refreshConnectionStatus(true)
     emitDebug('app', 'settings loaded', {
       locale: settingsStore.currentLocale,
@@ -445,6 +496,18 @@ watch(
   ],
   () => {
     syncQuotaAutoRefresh()
+  },
+)
+
+watch(
+  () => [
+    launcherStore.status.update.available,
+    launcherStore.status.update.checkSource,
+    launcherStore.status.update.checkedAt,
+    launcherStore.status.update.tagName,
+  ],
+  () => {
+    void maybePromptLauncherStartupUpdate()
   },
 )
 

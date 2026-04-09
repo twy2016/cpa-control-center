@@ -6,6 +6,7 @@ import {
   GetDashboardSnapshot,
   GetScanDetailsPage,
   ListAccountsPage,
+  ListScanHistory,
   ProbeAccount,
   ProbeAccounts,
   SetAccountDisabled,
@@ -41,9 +42,11 @@ interface AccountsState {
   pageSize: number
   summary: DashboardSummary
   history: ScanSummary[]
+  historyArchive: ScanSummary[]
   scanDetail: ScanDetailPage | null
   loading: boolean
   pageLoading: boolean
+  historyLoading: boolean
 }
 
 function emptySummary(): DashboardSummary {
@@ -89,9 +92,11 @@ export const useAccountsStore = defineStore('accountsStore', {
     pageSize: 20,
     summary: emptySummary(),
     history: [],
+    historyArchive: [],
     scanDetail: null,
     loading: false,
     pageLoading: false,
+    historyLoading: false,
   }),
   getters: {
     hasInventory: (state) => state.summary.totalAccounts > 0,
@@ -110,7 +115,20 @@ export const useAccountsStore = defineStore('accountsStore', {
       const snapshot = await GetDashboardSnapshot() as DashboardSnapshot
       this.summary = snapshot.summary
       this.history = Array.isArray(snapshot.history) ? snapshot.history : []
+      if (this.historyArchive.length === 0) {
+        this.historyArchive = [...this.history]
+      }
       return snapshot
+    },
+    async loadHistory(limit = 60) {
+      this.historyLoading = true
+      try {
+        const history = await ListScanHistory(limit) as ScanSummary[]
+        this.historyArchive = Array.isArray(history) ? history : []
+        return this.historyArchive
+      } finally {
+        this.historyLoading = false
+      }
     },
     async loadAccountsPage(options?: { page?: number; pageSize?: number; resetPage?: boolean }) {
       const settingsStore = useSettingsStore()
@@ -143,6 +161,29 @@ export const useAccountsStore = defineStore('accountsStore', {
         return page
       } finally {
         this.pageLoading = false
+      }
+    },
+    async applyWorkspaceFilters(
+      filters: {
+        query?: string
+        stateFilter?: string
+        providerFilter?: string
+        planFilter?: string
+        disabledFilter?: boolean | null
+      },
+      options?: { resetPage?: boolean; reload?: boolean },
+    ) {
+      this.query = normalizeFilterText(filters.query)
+      this.stateFilter = normalizeFilterText(filters.stateFilter)
+      this.providerFilter = normalizeFilterText(filters.providerFilter)
+      this.planFilter = normalizeFilterText(filters.planFilter)
+      this.disabledFilter = filters.disabledFilter ?? null
+
+      if (options?.resetPage) {
+        this.page = 1
+      }
+      if (options?.reload) {
+        await this.loadAccountsPage({ resetPage: options.resetPage })
       }
     },
     async refreshAll() {

@@ -50,6 +50,7 @@ function createEmptyUpdate(): LauncherUpdateInfo {
     releaseUrl: '',
     checkedAt: '',
     message: '',
+    checkSource: '',
   }
 }
 
