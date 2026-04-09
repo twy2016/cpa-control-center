@@ -777,6 +777,30 @@ func TestParseQuotaBucketResultMatchesGenericRateLimitBucketsMidWindow(t *testin
 	}
 }
 
+func TestParseQuotaBucketResultTreatsUsedPercentOneAsOnePercent(t *testing.T) {
+	payload := map[string]any{
+		"plan_type": "team",
+		"rate_limit": map[string]any{
+			"primary_window": map[string]any{
+				"used_percent": 1,
+				"reset_at":     "2026-03-13T09:22:56Z",
+			},
+			"secondary_window": map[string]any{
+				"used_percent": 57,
+				"reset_at":     "2026-03-18T12:33:46Z",
+			},
+		},
+	}
+
+	result, err := parseQuotaBucketResult(payload)
+	if err != nil {
+		t.Fatalf("parseQuotaBucketResult: %v", err)
+	}
+	if result.fiveHour == nil || result.fiveHour.resetAt != "2026-03-13T09:22:56Z" || result.fiveHour.remainingPercent != 99 {
+		t.Fatalf("unexpected primary-window five-hour bucket when used_percent=1: %+v", result.fiveHour)
+	}
+}
+
 func TestParseQuotaBucketResultMapsFreePrimaryWindowToWeekly(t *testing.T) {
 	payload := map[string]any{
 		"plan_type": "free",

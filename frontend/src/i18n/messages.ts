@@ -639,7 +639,7 @@ export const messages = {
     topbar: {
       configured: '已配置',
       connected: '已连接',
-      attention: '未启动',
+      attention: '连接异常',
       endpointHint: '请先在设置页填写 CPA 地址。',
       tracked: '已跟踪 {count} 个',
       noRecentScan: '暂无最近扫描',

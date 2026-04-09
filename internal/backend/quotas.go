@@ -752,21 +752,44 @@ func collectQuotaCandidates(path string, value any) []quotaCandidate {
 }
 
 func buildQuotaCandidate(path string, payload map[string]any) (quotaCandidate, bool) {
-	usedPercent, ok := floatValueFromAny(payload["used_percent"])
+	usedPercent, ok := quotaCandidateUsedPercent(payload)
 	if !ok {
 		return quotaCandidate{}, false
-	}
-	if usedPercent <= 1 {
-		usedPercent *= 100
 	}
 
 	return quotaCandidate{
 		path:        strings.ToLower(path),
 		usedPercent: clampPercentage(usedPercent),
-		resetAt:     normalizeQuotaResetAt(payload["reset_at"]),
+		resetAt:     quotaCandidateResetAt(payload),
 		window:      quotaWindowDuration(payload),
 		scoreBoost:  quotaCandidateScoreBoost(payload),
 	}, true
+}
+
+func quotaCandidateUsedPercent(payload map[string]any) (float64, bool) {
+	if usedPercent, ok := floatValueFromAny(payload["used_percent"]); ok {
+		return normalizeQuotaPercentValue(usedPercent), true
+	}
+	if remainingPercent, ok := floatValueFromAny(payload["remaining_percent"]); ok {
+		return clampPercentage(100 - normalizeQuotaPercentValue(remainingPercent)), true
+	}
+	return 0, false
+}
+
+func quotaCandidateResetAt(payload map[string]any) string {
+	for _, key := range []string{"reset_at", "resets_at", "resetAt", "resetsAt"} {
+		if resetAt := normalizeQuotaResetAt(payload[key]); resetAt != "" {
+			return resetAt
+		}
+	}
+	return ""
+}
+
+func normalizeQuotaPercentValue(value float64) float64 {
+	if value > 0 && value < 1 {
+		return value * 100
+	}
+	return value
 }
 
 func quotaWindowDuration(payload map[string]any) time.Duration {

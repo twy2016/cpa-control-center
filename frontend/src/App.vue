@@ -17,6 +17,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTasksStore } from '@/stores/tasks'
 import type { ViewKey } from '@/types'
 import { useI18n } from 'vue-i18n'
+import { isSameServiceOrigin } from '@/utils/connection'
 import { formatDateTime } from '@/utils/format'
 import { localeChinese } from '@/utils/locale'
 import { toErrorMessage } from '@/utils/errors'
@@ -457,14 +458,14 @@ watch(
   async ([serviceReachable, runtimeBaseUrl, configuredBaseUrl, managementToken], previous) => {
     const previousReachable = Array.isArray(previous) ? previous[0] : undefined
     const previousRuntimeBaseUrl = Array.isArray(previous) ? previous[1] : undefined
-    const normalizedConfiguredBaseUrl = String(configuredBaseUrl || '').trim().replace(/\/+$/, '')
-    const normalizedRuntimeBaseUrl = String(runtimeBaseUrl || '').trim().replace(/\/+$/, '')
+    const normalizedConfiguredBaseUrl = String(configuredBaseUrl || '').trim()
+    const normalizedRuntimeBaseUrl = String(runtimeBaseUrl || '').trim()
 
     if (!normalizedConfiguredBaseUrl || !String(managementToken || '').trim()) {
       settingsStore.setConnectionResult(null)
       return
     }
-    if (!normalizedRuntimeBaseUrl || normalizedConfiguredBaseUrl !== normalizedRuntimeBaseUrl) {
+    if (!normalizedRuntimeBaseUrl || !isSameServiceOrigin(normalizedConfiguredBaseUrl, normalizedRuntimeBaseUrl)) {
       return
     }
     if (serviceReachable === previousReachable && normalizedRuntimeBaseUrl === previousRuntimeBaseUrl) {
