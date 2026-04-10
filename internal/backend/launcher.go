@@ -132,9 +132,8 @@ func (l *launcherService) runStartupActions() {
 		update, updateErr := l.checkForUpdate(settings, true, launcherUpdateSourceStartup)
 		if updateErr != nil {
 			l.appendLog("warning", updateErr.Error())
-		} else if launcherStartupShouldBlockAutoStart(update) {
-			l.appendLog("info", update.Message)
-			return
+		} else if update.Available {
+			l.appendLog("info", fmt.Sprintf("%s 自动启动 CPA 将继续执行。", update.Message))
 		}
 	}
 
@@ -664,7 +663,7 @@ func (l *launcherService) currentUpdate(currentVersion string) LauncherUpdateInf
 }
 
 func launcherStartupShouldBlockAutoStart(update LauncherUpdateInfo) bool {
-	return update.Available
+	return false
 }
 
 func (l *launcherService) describeStatus(

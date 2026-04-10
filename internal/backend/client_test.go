@@ -532,3 +532,108 @@ func TestClientProbeTreatsUsageLimit401AsQuotaLimitedEvenWhenUnavailable(t *test
 		t.Fatalf("expected usage limit message to be preserved, got %+v", probed)
 	}
 }
+
+func TestClientProbeTreatsUsageLimitNon401AsQuotaLimited(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status_code": 429,
+				"body": `{
+					"error": {
+						"type": "usage_limit_reached",
+						"message": "The usage limit has been reached",
+						"plan_type": "free",
+						"resets_at": 1776411963,
+						"resets_in_seconds": 603811
+					}
+				}`,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	settings := AppSettings{
+		BaseURL:         server.URL,
+		ManagementToken: "token",
+		Locale:          localeEnglish,
+		TimeoutSeconds:  5,
+		Retries:         0,
+		UserAgent:       defaultUserAgent,
+	}
+
+	record := AccountRecord{
+		Name:             "quota-free-429.json",
+		AuthIndex:        "quota-free-429",
+		Type:             "codex",
+		Provider:         "codex",
+		ChatGPTAccountID: "acct-free-429",
+	}
+
+	probed := client.ProbeUsage(context.Background(), settings, record)
+	if probed.StateKey != stateQuotaLimited {
+		t.Fatalf("expected quota_limited state for usage_limit_reached 429, got %+v", probed)
+	}
+	if probed.Invalid401 {
+		t.Fatalf("usage_limit_reached 429 should not be marked invalid_401: %+v", probed)
+	}
+	if probed.ProbeErrorKind != "usage_limit_reached" {
+		t.Fatalf("expected usage_limit_reached error kind, got %+v", probed)
+	}
+}
+
+func TestClientProbeTreatsDirectUsageLimitPayloadAsQuotaLimited(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v0/management/api-call":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"type":              "usage_limit_reached",
+					"message":           "The usage limit has been reached",
+					"plan_type":         "free",
+					"resets_at":         1776411963,
+					"resets_in_seconds": 603811,
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient()
+	settings := AppSettings{
+		BaseURL:         server.URL,
+		ManagementToken: "token",
+		Locale:          localeEnglish,
+		TimeoutSeconds:  5,
+		Retries:         0,
+		UserAgent:       defaultUserAgent,
+	}
+
+	record := AccountRecord{
+		Name:             "quota-free-direct.json",
+		AuthIndex:        "quota-free-direct",
+		Type:             "codex",
+		Provider:         "codex",
+		ChatGPTAccountID: "acct-free-direct",
+	}
+
+	probed := client.ProbeUsage(context.Background(), settings, record)
+	if probed.StateKey != stateQuotaLimited {
+		t.Fatalf("expected quota_limited state for direct usage payload, got %+v", probed)
+	}
+	if probed.Invalid401 {
+		t.Fatalf("direct usage_limit_reached payload should not be marked invalid_401: %+v", probed)
+	}
+	if probed.PlanType != "free" {
+		t.Fatalf("expected direct usage payload to set plan type, got %+v", probed)
+	}
+}

@@ -228,7 +228,44 @@ func (c *Client) probeUsageOnce(ctx context.Context, settings AppSettings, recor
 		return result
 	}
 
+	if httpStatus, ok := intValueFromAny(body["http_status"]); ok {
+		result.Record.APIHTTPStatus = intPtr(httpStatus)
+	}
+
 	statusCode, ok := intValueFromAny(body["status_code"])
+	if ok {
+		result.Record.APIStatusCode = intPtr(statusCode)
+	}
+
+	var (
+		parsedBody map[string]any
+		parseErr   error
+	)
+	if ok {
+		rawBody := body["body"]
+		parsedBody, parseErr = toJSONObject(settings.Locale, rawBody)
+		if parseErr != nil && statusCode != http.StatusUnauthorized {
+			result.Record.ProbeErrorKind = "body_invalid_json"
+			result.Record.ProbeErrorText = parseErr.Error()
+			result.Record = classifyAccountState(result.Record)
+			result.UsageError = parseErr
+			return result
+		}
+	} else {
+		// Some CPA versions return the upstream payload directly without the status_code/body envelope.
+		parsedBody = body
+	}
+
+	applyUsageLimitDetails(&result.Record, parsedBody)
+	if result.Record.ProbeErrorKind == "usage_limit_reached" {
+		if strings.TrimSpace(result.Record.ProbeErrorText) == "" {
+			result.Record.ProbeErrorText = msg(settings.Locale, "state.quota_limited")
+		}
+		result.UsageError = errors.New(result.Record.ProbeErrorText)
+		result.Record = classifyAccountState(result.Record)
+		return result
+	}
+
 	if !ok {
 		result.Record.ProbeErrorKind = "missing_status_code"
 		result.Record.ProbeErrorText = msg(settings.Locale, "error.missing_status_code")
@@ -236,32 +273,11 @@ func (c *Client) probeUsageOnce(ctx context.Context, settings AppSettings, recor
 		result.UsageError = errors.New(result.Record.ProbeErrorText)
 		return result
 	}
-	result.Record.APIStatusCode = intPtr(statusCode)
-
-	if httpStatus, ok := intValueFromAny(body["http_status"]); ok {
-		result.Record.APIHTTPStatus = intPtr(httpStatus)
-	}
-
-	rawBody := body["body"]
-	parsedBody, err := toJSONObject(settings.Locale, rawBody)
-	if err != nil && statusCode != http.StatusUnauthorized {
-		result.Record.ProbeErrorKind = "body_invalid_json"
-		result.Record.ProbeErrorText = err.Error()
-		result.Record = classifyAccountState(result.Record)
-		result.UsageError = err
-		return result
-	}
-
-	applyUsageLimitDetails(&result.Record, parsedBody)
 
 	if statusCode == http.StatusUnauthorized {
-		if result.Record.ProbeErrorKind == "usage_limit_reached" {
-			result.UsageError = errors.New(result.Record.ProbeErrorText)
-		} else {
-			result.Record.ProbeErrorKind = ""
-			result.Record.ProbeErrorText = ""
-			result.UsageError = errors.New(msg(settings.Locale, "error.unexpected_upstream_status", statusCode))
-		}
+		result.Record.ProbeErrorKind = ""
+		result.Record.ProbeErrorText = ""
+		result.UsageError = errors.New(msg(settings.Locale, "error.unexpected_upstream_status", statusCode))
 		result.Record = classifyAccountState(result.Record)
 		return result
 	}
