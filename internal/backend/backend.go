@@ -120,6 +120,10 @@ func (b *Backend) GetCodexLocalConfigProfileContent(name string) (CodexLocalConf
 	return newCodexLocalConfigManager(b.store).ProfileContent(name)
 }
 
+func (b *Backend) ReloadCodexLocalConfigProfileContent(name string) (CodexLocalConfigProfileContent, error) {
+	return newCodexLocalConfigManager(b.store).ReloadProfileContent(name)
+}
+
 func (b *Backend) SaveCodexLocalConfigProfileContent(input CodexLocalConfigSaveInput) (CodexLocalConfigProfileContent, error) {
 	return newCodexLocalConfigManager(b.store).SaveProfileContent(input)
 }

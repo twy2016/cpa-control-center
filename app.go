@@ -144,6 +144,14 @@ func (a *App) GetCodexLocalConfigProfileContent(name string) (backend.CodexLocal
 	return service.GetCodexLocalConfigProfileContent(name)
 }
 
+func (a *App) ReloadCodexLocalConfigProfileContent(name string) (backend.CodexLocalConfigProfileContent, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.CodexLocalConfigProfileContent{}, err
+	}
+	return service.ReloadCodexLocalConfigProfileContent(name)
+}
+
 func (a *App) SaveCodexLocalConfigProfileContent(input backend.CodexLocalConfigSaveInput) (backend.CodexLocalConfigProfileContent, error) {
 	service, err := a.ensureBackend()
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -188,6 +189,199 @@ func TestCodexLocalConfigImportSwitchAndDelete(t *testing.T) {
 	}
 	if len(snapshot.Profiles) != 1 || snapshot.Profiles[0].Name != "OpenAI" {
 		t.Fatalf("unexpected profiles after delete: %+v", snapshot.Profiles)
+	}
+}
+
+func TestCodexLocalConfigSwitchSyncsMCPConfigAcrossProfiles(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	manager.defaultDirectory = filepath.Join(t.TempDir(), ".codex")
+	if err := ensureDir(manager.defaultDirectory); err != nil {
+		t.Fatalf("ensureDir: %v", err)
+	}
+
+	openAIConfig := "model = 'gpt-5'\n"
+	openAIRawAuth := "{\"api_key\":\"openai-key\"}\n"
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte(openAIConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenAI config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexAuthJSONFileName), []byte(openAIRawAuth), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenAI auth.json: %v", err)
+	}
+	if _, err := manager.ImportCurrent(CodexLocalConfigImportInput{Name: "OpenAI"}); err != nil {
+		t.Fatalf("ImportCurrent OpenAI: %v", err)
+	}
+
+	openRouterConfig := "model = 'openrouter/gpt-5'\n"
+	openRouterAuth := "{\"api_key\":\"openrouter-key\"}\n"
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte(openRouterConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenRouter config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexAuthJSONFileName), []byte(openRouterAuth), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenRouter auth.json: %v", err)
+	}
+	if _, err := manager.ImportCurrent(CodexLocalConfigImportInput{Name: "OpenRouter"}); err != nil {
+		t.Fatalf("ImportCurrent OpenRouter: %v", err)
+	}
+
+	openRouterConfigWithMCP := strings.Join([]string{
+		"model = 'openrouter/gpt-5'",
+		"mcp_oauth_callback_port = 7788",
+		"",
+		"[mcp_servers.context7]",
+		"command = 'npx'",
+		"args = ['-y', '@upstash/context7-mcp']",
+		"",
+		"[mcp_servers.context7.env]",
+		"DEFAULT_MINIMUM_TOKENS = '10000'",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte(openRouterConfigWithMCP), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenRouter current config with MCP: %v", err)
+	}
+
+	snapshot, err := manager.Switch(CodexLocalConfigSwitchInput{Name: "OpenAI"})
+	if err != nil {
+		t.Fatalf("Switch OpenAI: %v", err)
+	}
+	if snapshot.ActiveProfileName != "OpenAI" {
+		t.Fatalf("expected active profile OpenAI, got %+v", snapshot)
+	}
+
+	currentConfig, err := os.ReadFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName))
+	if err != nil {
+		t.Fatalf("ReadFile current config.toml: %v", err)
+	}
+	currentText := string(currentConfig)
+	if !strings.Contains(currentText, "model = 'gpt-5'") {
+		t.Fatalf("expected switched current config to keep OpenAI model, got %q", currentText)
+	}
+	if strings.Contains(currentText, "openrouter/gpt-5") {
+		t.Fatalf("switched current config should not keep OpenRouter model, got %q", currentText)
+	}
+	if !strings.Contains(currentText, "mcp_oauth_callback_port = 7788") {
+		t.Fatalf("expected switched current config to keep MCP root settings, got %q", currentText)
+	}
+	if !strings.Contains(currentText, "[mcp_servers.context7]") || !strings.Contains(currentText, "[mcp_servers.context7.env]") {
+		t.Fatalf("expected switched current config to keep MCP server tables, got %q", currentText)
+	}
+
+	openAIContent, err := manager.ProfileContent("OpenAI")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenAI: %v", err)
+	}
+	if !strings.Contains(openAIContent.ConfigToml, "mcp_oauth_callback_port = 7788") {
+		t.Fatalf("expected OpenAI profile to sync MCP root settings, got %q", openAIContent.ConfigToml)
+	}
+	if !strings.Contains(openAIContent.ConfigToml, "[mcp_servers.context7]") {
+		t.Fatalf("expected OpenAI profile to sync MCP servers, got %q", openAIContent.ConfigToml)
+	}
+
+	openRouterContent, err := manager.ProfileContent("OpenRouter")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenRouter: %v", err)
+	}
+	if !strings.Contains(openRouterContent.ConfigToml, "model = 'openrouter/gpt-5'") {
+		t.Fatalf("expected OpenRouter profile to keep its own model, got %q", openRouterContent.ConfigToml)
+	}
+	if !strings.Contains(openRouterContent.ConfigToml, "[mcp_servers.context7.env]") {
+		t.Fatalf("expected OpenRouter profile to keep MCP env table, got %q", openRouterContent.ConfigToml)
+	}
+}
+
+func TestCodexLocalConfigReloadProfileContentUsesCurrentFilesForActiveProfile(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	manager := newCodexLocalConfigManager(store)
+	manager.defaultDirectory = filepath.Join(t.TempDir(), ".codex")
+	if err := ensureDir(manager.defaultDirectory); err != nil {
+		t.Fatalf("ensureDir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte("model = 'gpt-5'\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenAI config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexAuthJSONFileName), []byte("{\"api_key\":\"openai-key\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenAI auth.json: %v", err)
+	}
+	if _, err := manager.ImportCurrent(CodexLocalConfigImportInput{Name: "OpenAI"}); err != nil {
+		t.Fatalf("ImportCurrent OpenAI: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte("model = 'openrouter/gpt-5'\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenRouter config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexAuthJSONFileName), []byte("{\"api_key\":\"openrouter-key\"}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile OpenRouter auth.json: %v", err)
+	}
+	if _, err := manager.ImportCurrent(CodexLocalConfigImportInput{Name: "OpenRouter"}); err != nil {
+		t.Fatalf("ImportCurrent OpenRouter: %v", err)
+	}
+	if _, err := manager.Switch(CodexLocalConfigSwitchInput{Name: "OpenAI"}); err != nil {
+		t.Fatalf("Switch OpenAI: %v", err)
+	}
+
+	currentConfig := strings.Join([]string{
+		"model = 'gpt-5.1'",
+		"mcp_oauth_callback_port = 7788",
+		"",
+		"[mcp_servers.context7]",
+		"command = 'npx'",
+		"args = ['-y', '@upstash/context7-mcp']",
+		"",
+	}, "\n")
+	currentAuth := "{\"api_key\":\"openai-new-key\"}\n"
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexConfigTomlFileName), []byte(currentConfig), 0o600); err != nil {
+		t.Fatalf("WriteFile current config.toml with MCP: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(manager.defaultDirectory, codexAuthJSONFileName), []byte(currentAuth), 0o600); err != nil {
+		t.Fatalf("WriteFile current auth.json with new key: %v", err)
+	}
+
+	reloaded, err := manager.ReloadProfileContent("OpenAI")
+	if err != nil {
+		t.Fatalf("ReloadProfileContent OpenAI: %v", err)
+	}
+	if reloaded.ConfigToml != currentConfig {
+		t.Fatalf("expected reload to return current config.toml, got %q", reloaded.ConfigToml)
+	}
+	if reloaded.AuthJSON != currentAuth {
+		t.Fatalf("expected reload to return current auth.json, got %q", reloaded.AuthJSON)
+	}
+
+	savedActive, err := manager.ProfileContent("OpenAI")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenAI: %v", err)
+	}
+	if savedActive.ConfigToml != currentConfig {
+		t.Fatalf("expected active profile to sync current config.toml, got %q", savedActive.ConfigToml)
+	}
+	if savedActive.AuthJSON != currentAuth {
+		t.Fatalf("expected active profile to sync current auth.json, got %q", savedActive.AuthJSON)
+	}
+
+	savedInactive, err := manager.ProfileContent("OpenRouter")
+	if err != nil {
+		t.Fatalf("ProfileContent OpenRouter: %v", err)
+	}
+	if !strings.Contains(savedInactive.ConfigToml, "model = 'openrouter/gpt-5'") {
+		t.Fatalf("expected inactive profile to keep its own model, got %q", savedInactive.ConfigToml)
+	}
+	if !strings.Contains(savedInactive.ConfigToml, "[mcp_servers.context7]") {
+		t.Fatalf("expected inactive profile to sync MCP tables from current config, got %q", savedInactive.ConfigToml)
 	}
 }
 

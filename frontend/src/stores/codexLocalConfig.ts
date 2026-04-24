@@ -9,6 +9,7 @@ import {
   ImportCodexLocalConfigProfiles,
   ImportCurrentCodexLocalConfig,
   OpenCodexLocalConfigDirectory,
+  ReloadCodexLocalConfigProfileContent,
   SaveCodexLocalConfigProfileContent,
   TestCodexLocalConfigProfileContent,
   TestCodexLocalConfigProfileConnection,
@@ -143,6 +144,27 @@ export const useCodexLocalConfigStore = defineStore('codexLocalConfigStore', {
     async selectProfile(name: string) {
       this.selectedProfileName = name
       return await this.loadProfileContent(name)
+    },
+    async reloadProfileContent(name?: string) {
+      const target = (name || this.selectedProfileName || '').trim()
+      if (!target) {
+        this.profileContent = null
+        return null
+      }
+      this.selectedProfileName = target
+      this.contentLoading = true
+      try {
+        const content = await ReloadCodexLocalConfigProfileContent(target)
+        this.profileContent = {
+          ...createEmptyProfileContent(),
+          ...(content as unknown as Partial<CodexLocalConfigProfileContent>),
+        }
+        const snapshot = await GetCodexLocalConfigSnapshot()
+        this.applySnapshot(snapshot as unknown as Partial<CodexLocalConfigSnapshot>)
+        return this.profileContent
+      } finally {
+        this.contentLoading = false
+      }
     },
     async loadSnapshot() {
       this.loading = true

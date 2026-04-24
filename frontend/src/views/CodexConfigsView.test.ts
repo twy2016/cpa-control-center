@@ -79,6 +79,7 @@ function createStoreMock(currentFilesReady = true) {
     testProfileContent: vi.fn().mockResolvedValue({ ok: true, message: '' }),
     createProfileContent: vi.fn().mockResolvedValue(undefined),
     loadProfileContent: vi.fn().mockResolvedValue(undefined),
+    reloadProfileContent: vi.fn().mockResolvedValue(undefined),
     saveProfileContent: vi.fn().mockResolvedValue({
       name: 'OpenAI',
       originalName: 'OpenAI',
@@ -201,5 +202,19 @@ describe('CodexConfigsView', () => {
     )
     expect(mockStore.saveProfileContent).toHaveBeenCalledTimes(1)
     expect(ElMessage.success).toHaveBeenCalledWith('Supplier profile files saved.')
+  })
+
+  it('reloads the selected profile from the dedicated reload action', async () => {
+    mockStore = createStoreMock(true)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const reloadButton = wrapper.findAll('button').find((button) => button.text() === 'Reload')
+    await reloadButton!.trigger('click')
+    await flushPromises()
+
+    expect(mockStore.reloadProfileContent).toHaveBeenCalledWith('OpenAI')
+    expect(mockStore.loadProfileContent).not.toHaveBeenCalledWith('OpenAI')
   })
 })

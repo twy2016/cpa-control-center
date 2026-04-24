@@ -318,7 +318,7 @@ async function reloadSelectedCodexProfile() {
     return
   }
   try {
-    await codexLocalConfigStore.loadProfileContent(codexLocalConfigStore.selectedProfile)
+    await codexLocalConfigStore.reloadProfileContent(codexLocalConfigStore.selectedProfile)
   } catch (error) {
     ElMessage.error(toErrorMessage(error))
   }

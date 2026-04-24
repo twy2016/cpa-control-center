@@ -32,6 +32,8 @@ const (
 )
 
 var codexLocalConfigSlugPattern = regexp.MustCompile(`[^a-z0-9]+`)
+var codexLocalConfigTableHeaderPattern = regexp.MustCompile(`^\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$`)
+var codexLocalConfigRootKeyPattern = regexp.MustCompile(`^([A-Za-z0-9_-]+)\s*=`)
 
 type codexLocalConfigIndex struct {
 	ActiveProfileName string                         `json:"activeProfileName"`
@@ -77,6 +79,25 @@ type codexLocalConfigTransferProfile struct {
 	Name       string `json:"name"`
 	ConfigToml string `json:"configToml"`
 	AuthJSON   string `json:"authJson"`
+}
+
+type codexLocalConfigDocument struct {
+	newline         string
+	trailingNewline bool
+	preamble        []string
+	blocks          []codexLocalConfigTableBlock
+}
+
+type codexLocalConfigTableBlock struct {
+	path  []string
+	lines []string
+}
+
+type codexLocalConfigMCPOverlay struct {
+	topLevelKeys  map[string]string
+	topLevelOrder []string
+	blocks        []codexLocalConfigTableBlock
+	targetKeys    map[string]struct{}
 }
 
 func newCodexLocalConfigManager(store *Store) *codexLocalConfigManager {
@@ -186,6 +207,9 @@ func (m *codexLocalConfigManager) ImportCurrent(input CodexLocalConfigImportInpu
 		CreatedAt: now,
 		UpdatedAt: now,
 	})
+	if _, err := m.syncMCPConfigAcrossProfiles(&index, string(configBytes)); err != nil {
+		return CodexLocalConfigSnapshot{}, err
+	}
 	if err := m.saveIndex(index); err != nil {
 		return CodexLocalConfigSnapshot{}, err
 	}
@@ -229,6 +253,96 @@ func (m *codexLocalConfigManager) ProfileContent(name string) (CodexLocalConfigP
 	}, nil
 }
 
+func (m *codexLocalConfigManager) ReloadProfileContent(name string) (CodexLocalConfigProfileContent, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return CodexLocalConfigProfileContent{}, errors.New("供应商名称不能为空")
+	}
+
+	index, err := m.loadIndex()
+	if err != nil {
+		return CodexLocalConfigProfileContent{}, err
+	}
+	targetIndex, profile := findCodexLocalConfigProfile(index.Profiles, name)
+	if profile == nil {
+		return CodexLocalConfigProfileContent{}, fmt.Errorf("找不到供应商配置 %q", name)
+	}
+	if !strings.EqualFold(strings.TrimSpace(index.ActiveProfileName), strings.TrimSpace(profile.Name)) {
+		return m.ProfileContent(profile.Name)
+	}
+
+	configBytes, err := os.ReadFile(m.defaultConfigPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CodexLocalConfigProfileContent{}, fmt.Errorf("当前 Codex 配置缺少 %s", codexConfigTomlFileName)
+		}
+		return CodexLocalConfigProfileContent{}, err
+	}
+	authBytes, err := os.ReadFile(m.defaultAuthPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CodexLocalConfigProfileContent{}, fmt.Errorf("当前 Codex 配置缺少 %s", codexAuthJSONFileName)
+		}
+		return CodexLocalConfigProfileContent{}, err
+	}
+
+	if err := m.ensureStorageLayout(); err != nil {
+		return CodexLocalConfigProfileContent{}, err
+	}
+	profileDir, err := m.profileDir(profile.DirName)
+	if err != nil {
+		return CodexLocalConfigProfileContent{}, err
+	}
+	if err := ensureDir(profileDir); err != nil {
+		return CodexLocalConfigProfileContent{}, err
+	}
+
+	storedConfigPath := filepath.Join(profileDir, codexConfigTomlFileName)
+	storedAuthPath := filepath.Join(profileDir, codexAuthJSONFileName)
+	storedConfigBytes, storedConfigErr := os.ReadFile(storedConfigPath)
+	if storedConfigErr != nil && !errors.Is(storedConfigErr, os.ErrNotExist) {
+		return CodexLocalConfigProfileContent{}, storedConfigErr
+	}
+	storedAuthBytes, storedAuthErr := os.ReadFile(storedAuthPath)
+	if storedAuthErr != nil && !errors.Is(storedAuthErr, os.ErrNotExist) {
+		return CodexLocalConfigProfileContent{}, storedAuthErr
+	}
+
+	mcpSynced, err := m.syncMCPConfigAcrossProfiles(&index, string(configBytes))
+	if err != nil {
+		return CodexLocalConfigProfileContent{}, err
+	}
+
+	profileChanged := storedConfigErr != nil || storedAuthErr != nil ||
+		!bytes.Equal(storedConfigBytes, configBytes) || !bytes.Equal(storedAuthBytes, authBytes)
+	if profileChanged {
+		if err := os.WriteFile(storedConfigPath, configBytes, 0o600); err != nil {
+			return CodexLocalConfigProfileContent{}, err
+		}
+		if err := os.WriteFile(storedAuthPath, authBytes, 0o600); err != nil {
+			return CodexLocalConfigProfileContent{}, err
+		}
+	}
+
+	if profileChanged || mcpSynced {
+		if profileChanged {
+			index.Profiles[targetIndex].UpdatedAt = nowISO()
+		}
+		if err := m.saveIndex(index); err != nil {
+			return CodexLocalConfigProfileContent{}, err
+		}
+		profile = &index.Profiles[targetIndex]
+	}
+
+	return CodexLocalConfigProfileContent{
+		Name:         profile.Name,
+		OriginalName: profile.Name,
+		ConfigToml:   string(configBytes),
+		AuthJSON:     string(authBytes),
+		UpdatedAt:    profile.UpdatedAt,
+	}, nil
+}
+
 func (m *codexLocalConfigManager) TestProfileContent(input CodexLocalConfigSaveInput) CodexLocalConfigValidationResult {
 	return validateCodexLocalConfigContent(input.Name, input.ConfigToml, input.AuthJSON)
 }
@@ -254,6 +368,13 @@ func (m *codexLocalConfigManager) Switch(input CodexLocalConfigSwitchInput) (Cod
 	targetIndex, target := findCodexLocalConfigProfile(index.Profiles, name)
 	if target == nil {
 		return CodexLocalConfigSnapshot{}, fmt.Errorf("找不到供应商配置 %q", name)
+	}
+	if currentConfigBytes, err := os.ReadFile(m.defaultConfigPath()); err == nil {
+		if _, err := m.syncMCPConfigAcrossProfiles(&index, string(currentConfigBytes)); err != nil {
+			return CodexLocalConfigSnapshot{}, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return CodexLocalConfigSnapshot{}, err
 	}
 
 	profileDir, err := m.profileDir(target.DirName)
@@ -380,6 +501,9 @@ func (m *codexLocalConfigManager) SaveProfileContent(input CodexLocalConfigSaveI
 		if err := os.WriteFile(m.defaultAuthPath(), authBytes, 0o600); err != nil {
 			return CodexLocalConfigProfileContent{}, err
 		}
+	}
+	if _, err := m.syncMCPConfigAcrossProfiles(&index, input.ConfigToml); err != nil {
+		return CodexLocalConfigProfileContent{}, err
 	}
 
 	now := nowISO()
@@ -815,6 +939,329 @@ func fileExists(path string) bool {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func (m *codexLocalConfigManager) syncMCPConfigAcrossProfiles(index *codexLocalConfigIndex, sourceConfig string) (bool, error) {
+	overlay := extractCodexLocalConfigMCPOverlay(sourceConfig)
+	if overlay.empty() {
+		return false, nil
+	}
+
+	updated := false
+	now := nowISO()
+	for i := range index.Profiles {
+		profileDir, err := m.profileDir(index.Profiles[i].DirName)
+		if err != nil {
+			return false, err
+		}
+		configPath := filepath.Join(profileDir, codexConfigTomlFileName)
+		configBytes, err := os.ReadFile(configPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+
+		merged, changed := mergeCodexLocalConfigMCP(string(configBytes), overlay)
+		if !changed {
+			continue
+		}
+		if err := os.WriteFile(configPath, []byte(merged), 0o600); err != nil {
+			return false, err
+		}
+		index.Profiles[i].UpdatedAt = now
+		updated = true
+	}
+
+	return updated, nil
+}
+
+func extractCodexLocalConfigMCPOverlay(config string) codexLocalConfigMCPOverlay {
+	doc := parseCodexLocalConfigDocument(config)
+	overlay := codexLocalConfigMCPOverlay{
+		topLevelKeys: make(map[string]string),
+		targetKeys:   make(map[string]struct{}),
+	}
+
+	for _, line := range doc.preamble {
+		key, ok := parseCodexLocalConfigRootKey(line)
+		if !ok || !isCodexLocalConfigMCPRootKey(key) {
+			continue
+		}
+		if _, exists := overlay.topLevelKeys[key]; !exists {
+			overlay.topLevelOrder = append(overlay.topLevelOrder, key)
+		}
+		overlay.topLevelKeys[key] = line
+	}
+
+	for _, block := range doc.blocks {
+		targetKey, ok := codexLocalConfigMCPOverlayKey(block.path)
+		if !ok {
+			continue
+		}
+		overlay.blocks = append(overlay.blocks, block)
+		overlay.targetKeys[targetKey] = struct{}{}
+	}
+
+	return overlay
+}
+
+func (o codexLocalConfigMCPOverlay) empty() bool {
+	return len(o.topLevelOrder) == 0 && len(o.blocks) == 0
+}
+
+func mergeCodexLocalConfigMCP(targetConfig string, overlay codexLocalConfigMCPOverlay) (string, bool) {
+	if overlay.empty() {
+		return targetConfig, false
+	}
+
+	doc := parseCodexLocalConfigDocument(targetConfig)
+	doc.preamble = mergeCodexLocalConfigMCPPreamble(doc.preamble, overlay)
+
+	filteredBlocks := make([]codexLocalConfigTableBlock, 0, len(doc.blocks)+len(overlay.blocks))
+	for _, block := range doc.blocks {
+		targetKey, ok := codexLocalConfigMCPOverlayKey(block.path)
+		if ok {
+			if _, replace := overlay.targetKeys[targetKey]; replace {
+				continue
+			}
+		}
+		filteredBlocks = append(filteredBlocks, block)
+	}
+	filteredBlocks = append(filteredBlocks, overlay.blocks...)
+	doc.blocks = filteredBlocks
+
+	merged := doc.String()
+	return merged, merged != targetConfig
+}
+
+func mergeCodexLocalConfigMCPPreamble(preamble []string, overlay codexLocalConfigMCPOverlay) []string {
+	if len(overlay.topLevelOrder) == 0 {
+		return append([]string{}, preamble...)
+	}
+
+	result := make([]string, 0, len(preamble)+len(overlay.topLevelOrder)+1)
+	for _, line := range preamble {
+		key, ok := parseCodexLocalConfigRootKey(line)
+		if ok && isCodexLocalConfigMCPRootKey(key) {
+			if _, replace := overlay.topLevelKeys[key]; replace {
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+
+	if len(result) > 0 && strings.TrimSpace(result[len(result)-1]) != "" {
+		result = append(result, "")
+	}
+	for _, key := range overlay.topLevelOrder {
+		result = append(result, overlay.topLevelKeys[key])
+	}
+	return result
+}
+
+func parseCodexLocalConfigDocument(config string) codexLocalConfigDocument {
+	lines, newline, trailingNewline := splitCodexLocalConfigLines(config)
+	doc := codexLocalConfigDocument{
+		newline:         newline,
+		trailingNewline: trailingNewline,
+	}
+	if len(lines) == 0 {
+		return doc
+	}
+
+	currentStart := -1
+	var currentPath []string
+	for i, line := range lines {
+		path, ok := parseCodexLocalConfigTablePath(line)
+		if !ok {
+			continue
+		}
+
+		if currentStart == -1 {
+			doc.preamble = append(doc.preamble, lines[:i]...)
+		} else {
+			doc.blocks = append(doc.blocks, codexLocalConfigTableBlock{
+				path:  append([]string{}, currentPath...),
+				lines: append([]string{}, lines[currentStart:i]...),
+			})
+		}
+		currentStart = i
+		currentPath = append([]string{}, path...)
+	}
+
+	if currentStart == -1 {
+		doc.preamble = append(doc.preamble, lines...)
+		return doc
+	}
+
+	doc.blocks = append(doc.blocks, codexLocalConfigTableBlock{
+		path:  append([]string{}, currentPath...),
+		lines: append([]string{}, lines[currentStart:]...),
+	})
+	return doc
+}
+
+func (d codexLocalConfigDocument) String() string {
+	lines := make([]string, 0, len(d.preamble))
+	lines = append(lines, d.preamble...)
+	for _, block := range d.blocks {
+		lines = append(lines, block.lines...)
+	}
+	return joinCodexLocalConfigLines(lines, d.newline, d.trailingNewline)
+}
+
+func splitCodexLocalConfigLines(config string) ([]string, string, bool) {
+	newline := "\n"
+	if strings.Contains(config, "\r\n") {
+		newline = "\r\n"
+	}
+	normalized := strings.ReplaceAll(config, "\r\n", "\n")
+	trailingNewline := strings.HasSuffix(normalized, "\n")
+	if trailingNewline {
+		normalized = strings.TrimSuffix(normalized, "\n")
+	}
+	if normalized == "" {
+		return nil, newline, trailingNewline
+	}
+	return strings.Split(normalized, "\n"), newline, trailingNewline
+}
+
+func joinCodexLocalConfigLines(lines []string, newline string, trailingNewline bool) string {
+	if newline == "" {
+		newline = "\n"
+	}
+	if len(lines) == 0 {
+		if trailingNewline {
+			return newline
+		}
+		return ""
+	}
+	text := strings.Join(lines, newline)
+	if trailingNewline {
+		text += newline
+	}
+	return text
+}
+
+func parseCodexLocalConfigRootKey(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	matches := codexLocalConfigRootKeyPattern.FindStringSubmatch(trimmed)
+	if len(matches) != 2 {
+		return "", false
+	}
+	return matches[1], true
+}
+
+func isCodexLocalConfigMCPRootKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), "mcp_")
+}
+
+func parseCodexLocalConfigTablePath(line string) ([]string, bool) {
+	matches := codexLocalConfigTableHeaderPattern.FindStringSubmatch(line)
+	if len(matches) != 2 {
+		return nil, false
+	}
+	return parseCodexLocalConfigKeyPath(matches[1])
+}
+
+func parseCodexLocalConfigKeyPath(raw string) ([]string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+
+	parts := make([]string, 0, 4)
+	for len(raw) > 0 {
+		raw = strings.TrimLeft(raw, " \t")
+		if raw == "" {
+			break
+		}
+
+		var part string
+		switch raw[0] {
+		case '"':
+			value, rest, ok := consumeCodexLocalQuotedKey(raw, '"')
+			if !ok {
+				return nil, false
+			}
+			part = value
+			raw = rest
+		case '\'':
+			value, rest, ok := consumeCodexLocalQuotedKey(raw, '\'')
+			if !ok {
+				return nil, false
+			}
+			part = value
+			raw = rest
+		default:
+			index := strings.IndexByte(raw, '.')
+			if index < 0 {
+				part = strings.TrimSpace(raw)
+				raw = ""
+			} else {
+				part = strings.TrimSpace(raw[:index])
+				raw = raw[index:]
+			}
+			if part == "" {
+				return nil, false
+			}
+		}
+
+		parts = append(parts, part)
+		raw = strings.TrimLeft(raw, " \t")
+		if raw == "" {
+			break
+		}
+		if raw[0] != '.' {
+			return nil, false
+		}
+		raw = raw[1:]
+	}
+
+	if len(parts) == 0 {
+		return nil, false
+	}
+	return parts, true
+}
+
+func consumeCodexLocalQuotedKey(raw string, quote byte) (string, string, bool) {
+	if len(raw) == 0 || raw[0] != quote {
+		return "", raw, false
+	}
+	var builder strings.Builder
+	escaped := false
+	for i := 1; i < len(raw); i++ {
+		ch := raw[i]
+		if quote == '"' && escaped {
+			builder.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if quote == '"' && ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == quote {
+			return builder.String(), raw[i+1:], true
+		}
+		builder.WriteByte(ch)
+	}
+	return "", raw, false
+}
+
+func codexLocalConfigMCPOverlayKey(path []string) (string, bool) {
+	if len(path) == 0 || path[0] != "mcp_servers" {
+		return "", false
+	}
+	if len(path) == 1 {
+		return "mcp_servers", true
+	}
+	return "mcp_servers." + path[1], true
 }
 
 func validateCodexLocalConfigContent(name string, configToml string, authJSON string) CodexLocalConfigValidationResult {
