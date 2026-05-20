@@ -165,6 +165,9 @@ func (b *Backend) SaveSettings(input AppSettings) (AppSettings, error) {
 }
 
 func (b *Backend) TestAndSaveSettings(input AppSettings) (ConnectionResult, error) {
+	if err := validateManagementTokenInput(input.ManagementToken); err != nil {
+		return ConnectionResult{}, err
+	}
 	settings := normalizeSettings(input, b.store.exportsDir)
 	result, err := b.client.TestConnection(context.Background(), settings)
 	if err != nil {
@@ -180,6 +183,9 @@ func (b *Backend) TestAndSaveSettings(input AppSettings) (ConnectionResult, erro
 }
 
 func (b *Backend) saveSettings(input AppSettings) (AppSettings, error) {
+	if err := validateManagementTokenInput(input.ManagementToken); err != nil {
+		return input, err
+	}
 	if input.Schedule.Enabled {
 		if err := validateScheduleSettings(input.Locale, input.Schedule); err != nil {
 			return input, err
@@ -204,6 +210,9 @@ func (b *Backend) saveSettings(input AppSettings) (AppSettings, error) {
 }
 
 func (b *Backend) TestConnection(input AppSettings) (ConnectionResult, error) {
+	if err := validateManagementTokenInput(input.ManagementToken); err != nil {
+		return ConnectionResult{}, err
+	}
 	settings := normalizeSettings(input, b.store.exportsDir)
 	result, err := b.client.TestConnection(context.Background(), settings)
 	if err != nil {
@@ -524,6 +533,13 @@ func ensureConfigured(settings AppSettings) error {
 	return nil
 }
 
+func validateManagementTokenInput(token string) error {
+	if isBcryptManagementSecret(token) {
+		return errors.New("管理令牌不能填写 config.yaml 中的 bcrypt 哈希值，请填写登录 CPA 面板时使用的明文管理密钥")
+	}
+	return nil
+}
+
 func (b *Backend) GetLauncherStatus() (LauncherStatusSnapshot, error) {
 	if b.launcher == nil {
 		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
@@ -594,6 +610,13 @@ func (b *Backend) GenerateLauncherConfig(input LauncherConfigTemplateInput) (Lau
 	return b.launcher.GenerateDefaultConfig(input)
 }
 
+func (b *Backend) LauncherManagementURL() (string, error) {
+	if b.launcher == nil {
+		return "", errors.New("launcher not initialized")
+	}
+	return b.launcher.ManagementURL()
+}
+
 func (b *Backend) ApplyLauncherConnection() (AppSettings, error) {
 	if b.launcher == nil {
 		return AppSettings{}, errors.New("launcher not initialized")
@@ -616,6 +639,20 @@ func (b *Backend) ApplyLauncherConnection() (AppSettings, error) {
 	}
 
 	settings.BaseURL = runtimeInfo.BaseURL
+	if isBcryptManagementSecret(runtimeInfo.ManagementSecretKey) {
+		if isBcryptManagementSecret(settings.ManagementToken) {
+			settings.ManagementToken = ""
+		}
+		saved, saveErr := b.saveSettings(settings)
+		if saveErr != nil {
+			return saved, saveErr
+		}
+		if strings.TrimSpace(saved.ManagementToken) == "" {
+			return saved, errors.New("当前 CPA 配置中的 remote-management.secret-key 是哈希值，无法自动回填明文管理令牌；请在设置页填写登录 CPA 面板时使用的明文管理令牌并保存")
+		}
+		return saved, nil
+	}
+
 	settings.ManagementToken = runtimeInfo.ManagementSecretKey
 	return b.saveSettings(settings)
 }

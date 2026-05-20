@@ -49,8 +49,11 @@ export function validateSettings(settings: AppSettings, t: Translate = fallbackT
     errors.baseUrl = t('validation.baseUrlProtocol')
   }
 
-  if (!settings.managementToken.trim()) {
+  const managementToken = settings.managementToken.trim()
+  if (!managementToken) {
     errors.managementToken = t('validation.managementTokenRequired')
+  } else if (/^\$2[abxy]\$/i.test(managementToken)) {
+    errors.managementToken = t('validation.managementTokenHash')
   }
 
   if (settings.probeWorkers < 1) {

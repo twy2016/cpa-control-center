@@ -52,7 +52,22 @@ const updateSummary = computed(() => {
   }
   return t('common.notAvailable')
 })
+const cpaManagerUpdateSummary = computed(() => {
+  const update = launcherStore.status.cpaManagerUpdate
+
+  if (update.message) {
+    return update.message
+  }
+  if (update.tagName) {
+    return t('launcher.cpaManagerLatestVersion', { version: update.tagName })
+  }
+  if (update.currentVersion) {
+    return `${t('launcher.currentVersion')}: ${update.currentVersion}`
+  }
+  return t('common.notAvailable')
+})
 const updateCheckedAt = computed(() => formatDateTime(launcherStore.status.update.checkedAt))
+const cpaManagerUpdateCheckedAt = computed(() => formatDateTime(launcherStore.status.cpaManagerUpdate.checkedAt))
 const updateTone = computed(() => {
   const update = launcherStore.status.update
   const message = `${update.message || ''} ${updateSummary.value}`.toLowerCase()
@@ -62,6 +77,18 @@ const updateTone = computed(() => {
   }
   if (/(失败|错误|超时|timeout|error|fail|http\s*\d+)/.test(message)) {
     return 'error'
+  }
+  return 'neutral'
+})
+const cpaManagerUpdateTone = computed(() => {
+  const update = launcherStore.status.cpaManagerUpdate
+  const message = `${update.message || ''} ${cpaManagerUpdateSummary.value}`.toLowerCase()
+
+  if (/(失败|错误|超时|timeout|error|fail|http\s*\d+)/.test(message)) {
+    return 'error'
+  }
+  if (update.tagName || update.available) {
+    return 'available'
   }
   return 'neutral'
 })
@@ -461,6 +488,14 @@ async function testNewCodexProfile() {
               </el-button>
             </div>
           </div>
+
+          <div class="launcher-update-strip" :data-tone="cpaManagerUpdateTone">
+            <div class="launcher-update-strip__head">
+              <strong>{{ t('launcher.latestCPAManagerUpdate') }}</strong>
+              <small>{{ cpaManagerUpdateCheckedAt }}</small>
+            </div>
+            <p class="launcher-update-strip__summary" :title="cpaManagerUpdateSummary">{{ cpaManagerUpdateSummary }}</p>
+          </div>
         </div>
       </article>
     </section>
@@ -537,6 +572,14 @@ async function testNewCodexProfile() {
           <div class="launcher-detail-item">
             <strong>{{ t('launcher.managementUrl') }}</strong>
             <span>{{ runtime?.managementUrl || t('common.notAvailable') }}</span>
+          </div>
+          <div class="launcher-detail-item">
+            <strong>{{ t('launcher.cpaManagerUrl') }}</strong>
+            <span>{{ runtime?.cpaManagerUrl || t('common.notAvailable') }}</span>
+          </div>
+          <div class="launcher-detail-item">
+            <strong>{{ t('launcher.cpaManagerDbPath') }}</strong>
+            <span>{{ runtime?.cpaManagerDbPath || t('common.notAvailable') }}</span>
           </div>
           <div class="launcher-detail-item">
             <strong>{{ t('launcher.configDirectory') }}</strong>

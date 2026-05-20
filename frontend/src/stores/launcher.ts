@@ -65,6 +65,7 @@ function createEmptyStatus(): LauncherStatusSnapshot {
     settings: createDefaultLauncherSettings(),
     runtime: null,
     update: createEmptyUpdate(),
+    cpaManagerUpdate: createEmptyUpdate(),
     logs: [],
   }
 }
@@ -95,6 +96,10 @@ export const useLauncherStore = defineStore('launcherStore', {
         update: {
           ...createEmptyUpdate(),
           ...(snapshot?.update ?? {}),
+        },
+        cpaManagerUpdate: {
+          ...createEmptyUpdate(),
+          ...(snapshot?.cpaManagerUpdate ?? {}),
         },
         logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
       }

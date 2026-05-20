@@ -613,14 +613,18 @@ func (a *App) SelectLauncherConfigSavePath() (string, error) {
 }
 
 func (a *App) OpenLauncherManagementPage() error {
-	snapshot, err := a.GetLauncherStatus()
+	service, err := a.ensureBackend()
 	if err != nil {
 		return err
 	}
-	if snapshot.Runtime == nil || snapshot.Runtime.ManagementURL == "" {
+	managementURL, err := service.LauncherManagementURL()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(managementURL) == "" {
 		return errors.New("当前没有可打开的管理页地址")
 	}
-	runtime.BrowserOpenURL(a.ctx, snapshot.Runtime.ManagementURL)
+	runtime.BrowserOpenURL(a.ctx, managementURL)
 	return nil
 }
 

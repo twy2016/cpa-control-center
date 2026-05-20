@@ -25,6 +25,9 @@ const (
 	defaultUserAgent            = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 	defaultHistoryLimit         = 30
 	defaultLauncherRepo         = "router-for-me/CLIProxyAPI"
+	defaultCPAManagerRepo       = "seakee/CPA-Manager"
+	defaultCPAManagerPanelRepo  = "https://github.com/seakee/CPA-Manager"
+	embeddedCPAManagerVersion   = "v1.3.0"
 	whamUsageURL                = "https://chatgpt.com/backend-api/wham/usage"
 )
 

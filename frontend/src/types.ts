@@ -82,6 +82,9 @@ export interface LauncherRuntimeInfo {
   baseUrl: string
   managementUrl: string
   serviceProbeUrl: string
+  cpaManagerUrl: string
+  cpaManagerHealthUrl: string
+  cpaManagerDbPath: string
 }
 
 export interface LauncherUpdateInfo {
@@ -105,6 +108,7 @@ export interface LauncherStatusSnapshot {
   settings: LauncherSettings
   runtime?: LauncherRuntimeInfo | null
   update: LauncherUpdateInfo
+  cpaManagerUpdate: LauncherUpdateInfo
   logs: LogEntry[]
 }
 

@@ -37,6 +37,16 @@ describe('validateSettings', () => {
     })
   })
 
+  it('rejects bcrypt hashes as management tokens', () => {
+    const settings = createDefaultSettings()
+    settings.baseUrl = 'https://example.com'
+    settings.managementToken = '$2a$10$ygh/EsdciY5FHKXbS1b3COL.DlnJExjRbfjqFbozjBXCmRwrQOGC.'
+
+    expect(validateSettings(settings)).toMatchObject({
+      managementToken: expect.any(String),
+    })
+  })
+
   it('rejects invalid scheduler settings when enabled', () => {
     const settings = createDefaultSettings()
     settings.baseUrl = 'https://example.com'

@@ -3,6 +3,8 @@ package backend
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	cpamanager "cpa-control-center/internal/cpamanager"
 	"github.com/pkg/browser"
 	"golang.org/x/net/http/httpproxy"
 )
@@ -48,15 +51,17 @@ type launcherService struct {
 	emitter        EventEmitter
 	probeClient    *http.Client
 	downloadClient *http.Client
+	cpaManager     *cpamanager.Service
 
-	mu             sync.Mutex
-	cmd            *exec.Cmd
-	doneCh         chan struct{}
-	stopping       bool
-	lastStartError string
-	logs           []LogEntry
-	update         LauncherUpdateInfo
-	stopCh         chan struct{}
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	doneCh           chan struct{}
+	stopping         bool
+	lastStartError   string
+	logs             []LogEntry
+	update           LauncherUpdateInfo
+	cpaManagerUpdate LauncherUpdateInfo
+	stopCh           chan struct{}
 }
 
 type launcherReleaseInfo struct {
@@ -76,6 +81,10 @@ type launcherProxyDiagnostics struct {
 }
 
 func newLauncherService(store *Store, logger *Logger, emitter EventEmitter) *launcherService {
+	cpaManagerDataDir := filepathJoin(".", "cpa-manager")
+	if store != nil && strings.TrimSpace(store.dataDir) != "" {
+		cpaManagerDataDir = filepathJoin(store.dataDir, "cpa-manager")
+	}
 	return &launcherService{
 		store:   store,
 		logger:  logger,
@@ -86,7 +95,8 @@ func newLauncherService(store *Store, logger *Logger, emitter EventEmitter) *lau
 		downloadClient: &http.Client{
 			Timeout: launcherDownloadTimeout,
 		},
-		stopCh: make(chan struct{}),
+		cpaManager: cpamanager.New(cpaManagerDataDir),
+		stopCh:     make(chan struct{}),
 	}
 }
 
@@ -115,6 +125,9 @@ func (l *launcherService) Close() {
 	default:
 		close(l.stopCh)
 	}
+	if l.cpaManager != nil {
+		_ = l.cpaManager.Stop(context.Background())
+	}
 }
 
 func (l *launcherService) runStartupActions() {
@@ -128,12 +141,17 @@ func (l *launcherService) runStartupActions() {
 		l.appendLog("warning", err.Error())
 	}
 
-	if settings.Launcher.CheckForUpdatesOnStartup && strings.TrimSpace(settings.Launcher.ExecutablePath) != "" {
-		update, updateErr := l.checkForUpdate(settings, true, launcherUpdateSourceStartup)
-		if updateErr != nil {
-			l.appendLog("warning", updateErr.Error())
-		} else if update.Available {
-			l.appendLog("info", fmt.Sprintf("%s 自动启动 CPA 将继续执行。", update.Message))
+	if settings.Launcher.CheckForUpdatesOnStartup {
+		if strings.TrimSpace(settings.Launcher.ExecutablePath) != "" {
+			update, updateErr := l.checkForUpdate(settings, true, launcherUpdateSourceStartup)
+			if updateErr != nil {
+				l.appendLog("warning", updateErr.Error())
+			} else if update.Available {
+				l.appendLog("info", fmt.Sprintf("%s 自动启动 CPA 将继续执行。", update.Message))
+			}
+		}
+		if _, managerUpdateErr := l.checkCPAManagerForUpdate(settings, true, launcherUpdateSourceStartup); managerUpdateErr != nil {
+			l.appendLog("warning", managerUpdateErr.Error())
 		}
 	}
 
@@ -147,6 +165,11 @@ func (l *launcherService) runStartupActions() {
 		return
 	}
 	if snapshot.Status != launcherStatusStopped {
+		if snapshot.ServiceReachable && snapshot.Runtime != nil {
+			if _, err := l.startCPAManager(context.Background(), settings, *snapshot.Runtime); err != nil {
+				l.appendLog("warning", err.Error())
+			}
+		}
 		return
 	}
 
@@ -177,6 +200,7 @@ func (l *launcherService) Refresh() (LauncherStatusSnapshot, error) {
 	}
 
 	update := l.currentUpdate(settings.Launcher.LastInstalledVersion)
+	cpaManagerUpdate := l.currentCPAManagerUpdate()
 
 	var (
 		runtimeInfo       *LauncherRuntimeInfo
@@ -193,6 +217,7 @@ func (l *launcherService) Refresh() (LauncherStatusSnapshot, error) {
 			runtimeInfo = &info
 			serviceReachable = l.probeService(info.ServiceProbeURL)
 			matchedProcessID, _ = findLauncherProcessPID(info.ExecutablePath, info.ConfigPath)
+			l.attachCPAManagerRuntime(runtimeInfo)
 		}
 	}
 
@@ -214,6 +239,7 @@ func (l *launcherService) Refresh() (LauncherStatusSnapshot, error) {
 		Settings:         settings.Launcher,
 		Runtime:          runtimeInfo,
 		Update:           update,
+		CPAManagerUpdate: cpaManagerUpdate,
 		Logs:             l.snapshotLogs(),
 	}, nil
 }
@@ -259,6 +285,7 @@ func (l *launcherService) StartService() (LauncherStatusSnapshot, error) {
 	if err != nil {
 		return LauncherStatusSnapshot{}, err
 	}
+	l.ensureCPAManagerPanel(info)
 
 	l.mu.Lock()
 	if l.cmd != nil {
@@ -270,6 +297,9 @@ func (l *launcherService) StartService() (LauncherStatusSnapshot, error) {
 	existingProcessID, _ := findLauncherProcessPID(info.ExecutablePath, info.ConfigPath)
 	if existingProcessID > 0 {
 		l.appendLog("info", fmt.Sprintf("检测到 CPA 已在运行，PID=%d。", existingProcessID))
+		if _, err := l.startCPAManager(context.Background(), settings, info); err != nil {
+			l.appendLog("warning", err.Error())
+		}
 		snapshot, refreshErr := l.Refresh()
 		if refreshErr == nil {
 			l.emitStatus(snapshot)
@@ -314,7 +344,7 @@ func (l *launcherService) StartService() (LauncherStatusSnapshot, error) {
 	go l.captureProcessOutput("stdout", stdout)
 	go l.captureProcessOutput("stderr", stderr)
 	go l.waitForProcessExit(cmd, doneCh)
-	go l.waitForServiceReady(info, settings.Launcher.OpenManagementPageAfterStart)
+	go l.waitForServiceReady(settings, info, settings.Launcher.OpenManagementPageAfterStart)
 
 	snapshot, err := l.Refresh()
 	if err == nil {
@@ -324,6 +354,10 @@ func (l *launcherService) StartService() (LauncherStatusSnapshot, error) {
 }
 
 func (l *launcherService) StopService() (LauncherStatusSnapshot, error) {
+	if err := l.stopCPAManager(); err != nil {
+		l.appendLog("warning", err.Error())
+	}
+
 	l.mu.Lock()
 	cmd := l.cmd
 	doneCh := l.doneCh
@@ -423,8 +457,13 @@ func (l *launcherService) CheckForUpdate() (LauncherStatusSnapshot, error) {
 	if err != nil {
 		return LauncherStatusSnapshot{}, err
 	}
-	if _, err := l.checkForUpdate(settings, false, launcherUpdateSourceManual); err != nil {
-		return LauncherStatusSnapshot{}, err
+	_, cpaErr := l.checkForUpdate(settings, false, launcherUpdateSourceManual)
+	_, managerErr := l.checkCPAManagerForUpdate(settings, false, launcherUpdateSourceManual)
+	if cpaErr != nil {
+		return LauncherStatusSnapshot{}, cpaErr
+	}
+	if managerErr != nil {
+		return LauncherStatusSnapshot{}, managerErr
 	}
 	snapshot, err := l.Refresh()
 	if err == nil {
@@ -645,6 +684,26 @@ func (l *launcherService) InspectRuntime() (*LauncherRuntimeInfo, error) {
 	return &info, nil
 }
 
+func (l *launcherService) ManagementURL() (string, error) {
+	settings, err := l.store.LoadSettings()
+	if err != nil {
+		return "", err
+	}
+	if !hasLauncherPaths(settings.Launcher) {
+		return "", errors.New("当前未配置本地 CPA 运行时")
+	}
+	info, err := inspectLauncherRuntime(settings.Launcher.ExecutablePath, settings.Launcher.ConfigPath)
+	if err != nil {
+		return "", err
+	}
+
+	l.ensureCPAManagerPanel(info)
+	if _, startErr := l.startCPAManager(context.Background(), settings, info); startErr != nil {
+		l.appendLog("warning", startErr.Error())
+	}
+	return info.ManagementURL, nil
+}
+
 func (l *launcherService) emitStatus(snapshot LauncherStatusSnapshot) {
 	if l.emitter != nil {
 		l.emitter.Emit("launcher:status", snapshot)
@@ -658,6 +717,17 @@ func (l *launcherService) currentUpdate(currentVersion string) LauncherUpdateInf
 	update := l.update
 	if strings.TrimSpace(update.CurrentVersion) == "" {
 		update.CurrentVersion = strings.TrimSpace(currentVersion)
+	}
+	return update
+}
+
+func (l *launcherService) currentCPAManagerUpdate() LauncherUpdateInfo {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	update := l.cpaManagerUpdate
+	if strings.TrimSpace(update.CurrentVersion) == "" {
+		update.CurrentVersion = embeddedCPAManagerVersion
 	}
 	return update
 }
@@ -850,21 +920,316 @@ func (l *launcherService) waitForProcessExit(cmd *exec.Cmd, doneCh chan struct{}
 	l.mu.Unlock()
 
 	l.appendLog("info", fmt.Sprintf("CPA 进程已退出，ExitCode=%d。", exitCode))
+	if err := l.stopCPAManager(); err != nil {
+		l.appendLog("warning", err.Error())
+	}
 	l.refreshAndEmit()
 }
 
-func (l *launcherService) waitForServiceReady(info LauncherRuntimeInfo, openManagement bool) {
+func (l *launcherService) waitForServiceReady(settings AppSettings, info LauncherRuntimeInfo, openManagement bool) {
 	for attempt := 0; attempt < 30; attempt++ {
 		time.Sleep(500 * time.Millisecond)
 		if l.probeService(info.ServiceProbeURL) {
+			managementURL := info.ManagementURL
+			if _, err := l.startCPAManager(context.Background(), settings, info); err != nil {
+				l.appendLog("warning", err.Error())
+			}
 			if openManagement {
-				_ = browser.OpenURL(info.ManagementURL)
+				_ = browser.OpenURL(managementURL)
 			}
 			l.refreshAndEmit()
 			return
 		}
 	}
 	l.refreshAndEmit()
+}
+
+func (l *launcherService) startCPAManager(ctx context.Context, settings AppSettings, info LauncherRuntimeInfo) (cpamanager.RuntimeInfo, error) {
+	if l.cpaManager == nil {
+		return cpamanager.RuntimeInfo{}, errors.New("CPA-Manager 服务未初始化")
+	}
+
+	previousRuntime, wasRunning := l.cpaManager.Runtime()
+	managementKey, _, skippedHashedKey := resolveLauncherManagementKey(settings, info)
+
+	runtimeInfo, err := l.cpaManager.Start(ctx, cpamanager.StartConfig{
+		CPAUpstreamURL: info.BaseURL,
+		ManagementKey:  managementKey,
+	})
+	if err != nil {
+		return cpamanager.RuntimeInfo{}, fmt.Errorf("启动 CPA-Manager 失败: %w", err)
+	}
+
+	unchangedRuntime := wasRunning && previousRuntime.ManagementURL == runtimeInfo.ManagementURL
+	if unchangedRuntime {
+		return runtimeInfo, nil
+	}
+
+	if managementKey == "" {
+		if skippedHashedKey {
+			l.appendLog("warning", "检测到 CPA 配置中的 remote-management.secret-key 是哈希值，不能作为 Usage Service 管理密钥使用；请在设置页保存登录 CPA 面板时使用的明文管理令牌，或在 CPA 面板中首次配置 Usage Service。")
+		} else {
+			l.appendLog("warning", "CPA-Manager 已启动，但当前没有可自动注入的 Management Key；首次打开需要在页面中完成 setup。")
+		}
+	}
+	if !info.UsageStatisticsEnabled {
+		l.appendLog("warning", "当前 CPA config.yaml 未启用 usage-statistics-enabled，CPA-Manager 请求统计可能没有数据。")
+	}
+
+	l.appendLog("info", fmt.Sprintf("CPA-Manager Usage Service 已启动：%s。", runtimeInfo.BaseURL))
+	return runtimeInfo, nil
+}
+
+func resolveLauncherManagementKey(settings AppSettings, info LauncherRuntimeInfo) (string, string, bool) {
+	settingsToken := strings.TrimSpace(settings.ManagementToken)
+	skippedHashedKey := false
+	if settingsToken != "" {
+		if !isBcryptManagementSecret(settingsToken) {
+			return settingsToken, "settings", false
+		}
+		skippedHashedKey = true
+	}
+
+	configKey := strings.TrimSpace(info.ManagementSecretKey)
+	if configKey != "" {
+		if !isBcryptManagementSecret(configKey) {
+			return configKey, "config", skippedHashedKey
+		}
+		skippedHashedKey = true
+	}
+
+	return "", "", skippedHashedKey
+}
+
+func isBcryptManagementSecret(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 7 {
+		return false
+	}
+	return strings.HasPrefix(value, "$2a$") ||
+		strings.HasPrefix(value, "$2b$") ||
+		strings.HasPrefix(value, "$2x$") ||
+		strings.HasPrefix(value, "$2y$")
+}
+
+func (l *launcherService) ensureCPAManagerPanel(info LauncherRuntimeInfo) {
+	if strings.TrimSpace(info.ConfigPath) != "" {
+		changed, err := ensureCPAManagerPanelRepository(info.ConfigPath)
+		if err != nil {
+			l.appendLog("warning", fmt.Sprintf("更新 CPA 管理面板仓库配置失败: %v", err))
+		} else if changed {
+			l.appendLog("info", fmt.Sprintf("已将 CPA 管理面板仓库切换为 %s。", defaultCPAManagerPanelRepo))
+		}
+	}
+
+	action, err := ensureCPAManagerPanelAsset(info.ExecutableDirectory)
+	if err != nil {
+		l.appendLog("warning", fmt.Sprintf("准备 CPA-Manager 管理面板失败: %v", err))
+		return
+	}
+	switch action {
+	case "copied":
+		l.appendLog("info", "已将 CPA-Manager 管理面板安装到 CPA static 目录。")
+	case "removed":
+		l.appendLog("info", "已移除旧 CPA 管理面板缓存，CPA 下次启动会重新下载 CPA-Manager 面板。")
+	}
+}
+
+func ensureCPAManagerPanelRepository(configPath string) (bool, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return false, nil
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, err
+	}
+	next, changed := replaceCPAManagerPanelRepository(string(data))
+	if !changed {
+		return false, nil
+	}
+	mode := os.FileMode(0o644)
+	if info, statErr := os.Stat(configPath); statErr == nil {
+		mode = info.Mode()
+	}
+	if err := os.WriteFile(configPath, []byte(next), mode); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func replaceCPAManagerPanelRepository(configText string) (string, bool) {
+	if strings.TrimSpace(configText) == "" {
+		return configText, false
+	}
+
+	newline := "\n"
+	if strings.Contains(configText, "\r\n") {
+		newline = "\r\n"
+	}
+	normalized := strings.ReplaceAll(configText, "\r\n", "\n")
+	hasTrailingNewline := strings.HasSuffix(normalized, "\n")
+	lines := strings.Split(normalized, "\n")
+	if hasTrailingNewline && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+
+	inRemoteManagement := false
+	remoteIndent := 0
+	insertIndex := -1
+	changed := false
+
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		key, value, ok := yamlScalarLine(line)
+		if !ok {
+			continue
+		}
+		indent := leadingSpaces(line)
+		if inRemoteManagement && indent <= remoteIndent {
+			if insertIndex >= 0 {
+				lines = insertString(lines, insertIndex, strings.Repeat(" ", remoteIndent+2)+cpamanagerPanelRepositoryYAML())
+				changed = true
+			}
+			inRemoteManagement = false
+			insertIndex = -1
+		}
+
+		if key == "remote-management" && strings.TrimSpace(value) == "" {
+			inRemoteManagement = true
+			remoteIndent = indent
+			insertIndex = index + 1
+			continue
+		}
+		if !inRemoteManagement {
+			continue
+		}
+		if key == "disable-control-panel" {
+			insertIndex = index + 1
+			continue
+		}
+		if key == "panel-github-repository" {
+			if unquoteYAMLValue(value) == defaultCPAManagerPanelRepo {
+				return configText, false
+			}
+			lines[index] = strings.Repeat(" ", indent) + cpamanagerPanelRepositoryYAML()
+			changed = true
+			insertIndex = -1
+			break
+		}
+	}
+
+	if !changed && inRemoteManagement && insertIndex >= 0 {
+		lines = insertString(lines, insertIndex, strings.Repeat(" ", remoteIndent+2)+cpamanagerPanelRepositoryYAML())
+		changed = true
+	}
+	if !changed {
+		return configText, false
+	}
+
+	result := strings.Join(lines, newline)
+	if hasTrailingNewline {
+		result += newline
+	}
+	return result, true
+}
+
+func cpamanagerPanelRepositoryYAML() string {
+	return fmt.Sprintf("panel-github-repository: %q", defaultCPAManagerPanelRepo)
+}
+
+func yamlScalarLine(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(stripYAMLComment(strings.TrimRight(line, "\r")))
+	if trimmed == "" || strings.HasPrefix(trimmed, "-") {
+		return "", "", false
+	}
+	colonIndex := findYAMLColon(trimmed)
+	if colonIndex <= 0 {
+		return "", "", false
+	}
+	return strings.TrimSpace(trimmed[:colonIndex]), strings.TrimSpace(trimmed[colonIndex+1:]), true
+}
+
+func insertString(values []string, index int, value string) []string {
+	if index < 0 || index > len(values) {
+		index = len(values)
+	}
+	values = append(values, "")
+	copy(values[index+1:], values[index:])
+	values[index] = value
+	return values
+}
+
+func ensureCPAManagerPanelAsset(executableDirectory string) (string, error) {
+	executableDirectory = strings.TrimSpace(executableDirectory)
+	if executableDirectory == "" {
+		return "", nil
+	}
+
+	staticPanelPath := filepath.Join(executableDirectory, "static", "management.html")
+	if panelSupportsUsageService(staticPanelPath) {
+		return "", nil
+	}
+
+	localPanelPath := filepath.Join(executableDirectory, "management.html")
+	if panelSupportsUsageService(localPanelPath) {
+		if err := ensureDir(filepath.Dir(staticPanelPath)); err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(localPanelPath)
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(staticPanelPath, data, 0o644); err != nil {
+			return "", err
+		}
+		return "copied", nil
+	}
+
+	if _, err := os.Stat(staticPanelPath); err == nil {
+		if removeErr := os.Remove(staticPanelPath); removeErr != nil {
+			return "", removeErr
+		}
+		return "removed", nil
+	}
+	return "", nil
+}
+
+func panelSupportsUsageService(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(data, []byte("externalUsageService")) ||
+		bytes.Contains(data, []byte("Usage Service")) ||
+		bytes.Contains(data, []byte("CPA-Manager"))
+}
+
+func (l *launcherService) stopCPAManager() error {
+	if l.cpaManager == nil {
+		return nil
+	}
+	if _, ok := l.cpaManager.Runtime(); !ok {
+		return nil
+	}
+	if err := l.cpaManager.Stop(context.Background()); err != nil {
+		return fmt.Errorf("停止 CPA-Manager 失败: %w", err)
+	}
+	l.appendLog("info", "CPA-Manager 已停止。")
+	return nil
+}
+
+func (l *launcherService) attachCPAManagerRuntime(info *LauncherRuntimeInfo) {
+	if info == nil || l.cpaManager == nil {
+		return
+	}
+	runtimeInfo, ok := l.cpaManager.Runtime()
+	if !ok {
+		return
+	}
+	info.CPAManagerURL = runtimeInfo.BaseURL
+	info.CPAManagerHealthURL = runtimeInfo.HealthURL
+	info.CPAManagerDBPath = runtimeInfo.DBPath
 }
 
 func (l *launcherService) checkForUpdate(settings AppSettings, silent bool, source string) (LauncherUpdateInfo, error) {
@@ -911,6 +1276,54 @@ func (l *launcherService) checkForUpdate(settings AppSettings, silent bool, sour
 
 	l.mu.Lock()
 	l.update = update
+	l.mu.Unlock()
+	if !silent {
+		l.appendLog("info", update.Message)
+	}
+	l.emitStatusIfPossible()
+	return update, nil
+}
+
+func (l *launcherService) checkCPAManagerForUpdate(settings AppSettings, silent bool, source string) (LauncherUpdateInfo, error) {
+	diagnostics, err := launcherProxyDiagnosticsFromSettings(settings.Launcher, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", defaultCPAManagerRepo))
+	if err != nil {
+		return LauncherUpdateInfo{}, err
+	}
+
+	release, err := l.fetchLatestReleaseMetadata(defaultCPAManagerRepo, embeddedCPAManagerVersion, diagnostics.EffectiveProxyURL, "CPA-Manager")
+	update := LauncherUpdateInfo{
+		CurrentVersion: embeddedCPAManagerVersion,
+		CheckedAt:      nowISO(),
+		CheckSource:    source,
+	}
+	if err != nil {
+		update.Message = err.Error()
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		l.emitStatusIfPossible()
+		return update, err
+	}
+
+	if release == nil {
+		update.Message = "CPA-Manager 已是最新版本。"
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		if !silent {
+			l.appendLog("info", update.Message)
+		}
+		l.emitStatusIfPossible()
+		return update, nil
+	}
+
+	update.Available = true
+	update.TagName = release.TagName
+	update.ReleaseURL = release.ReleaseURL
+	update.Message = fmt.Sprintf("CPA-Manager 上游最新版本为 %s；当前 Usage Service 随 Control Center 内嵌更新。", release.TagName)
+
+	l.mu.Lock()
+	l.cpaManagerUpdate = update
 	l.mu.Unlock()
 	if !silent {
 		l.appendLog("info", update.Message)
@@ -987,6 +1400,60 @@ func (l *launcherService) fetchLatestRelease(repo string, currentVersion string,
 		AssetDownloadURL: asset.BrowserDownloadURL,
 		AssetSize:        asset.Size,
 		ReleaseURL:       payload.HTMLURL,
+	}, nil
+}
+
+func (l *launcherService) fetchLatestReleaseMetadata(repo string, currentVersion string, proxyURL string, label string) (*launcherReleaseInfo, error) {
+	repo = strings.TrimSpace(repo)
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = repo
+	}
+
+	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	request, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", "CPA-Control-Center")
+	request.Header.Set("Accept", "application/vnd.github+json")
+
+	client, proxyLabel, err := l.downloadClientForProxy(proxyURL, request.URL.String())
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		if proxyLabel != "" {
+			return nil, fmt.Errorf("获取 %s 最新版本失败（%s）: %w", label, proxyLabel, err)
+		}
+		return nil, fmt.Errorf("获取 %s 最新版本失败: %w", label, err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("获取 %s 最新版本失败: HTTP %d", label, response.StatusCode)
+	}
+
+	var payload struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("解析 %s 发布信息失败: %w", label, err)
+	}
+	if strings.TrimSpace(payload.TagName) == "" {
+		return nil, fmt.Errorf("%s 发布信息缺少版本号", label)
+	}
+
+	if compareVersions(strings.TrimSpace(currentVersion), strings.TrimSpace(payload.TagName)) >= 0 {
+		return nil, nil
+	}
+
+	return &launcherReleaseInfo{
+		TagName:    payload.TagName,
+		ReleaseURL: payload.HTMLURL,
 	}, nil
 }
 
@@ -1695,6 +2162,7 @@ func writeDefaultLauncherConfig(configPath string, host string, port int, proxyU
 	builder.WriteString("  allow-remote: false\n")
 	builder.WriteString(fmt.Sprintf("  secret-key: %q\n", strings.TrimSpace(secretKey)))
 	builder.WriteString("  disable-control-panel: false\n")
+	builder.WriteString(fmt.Sprintf("  panel-github-repository: %q\n", defaultCPAManagerPanelRepo))
 	builder.WriteString(fmt.Sprintf("auth-dir: %q\n", filepath.Join(userHomeDirectory(), ".cli-proxy-api")))
 	builder.WriteString("api-keys: []\n")
 	builder.WriteString("debug: false\n")

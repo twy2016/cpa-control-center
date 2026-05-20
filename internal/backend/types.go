@@ -71,6 +71,9 @@ type LauncherRuntimeInfo struct {
 	BaseURL                    string `json:"baseUrl"`
 	ManagementURL              string `json:"managementUrl"`
 	ServiceProbeURL            string `json:"serviceProbeUrl"`
+	CPAManagerURL              string `json:"cpaManagerUrl"`
+	CPAManagerHealthURL        string `json:"cpaManagerHealthUrl"`
+	CPAManagerDBPath           string `json:"cpaManagerDbPath"`
 }
 
 type LauncherUpdateInfo struct {
@@ -94,6 +97,7 @@ type LauncherStatusSnapshot struct {
 	Settings         LauncherSettings     `json:"settings"`
 	Runtime          *LauncherRuntimeInfo `json:"runtime,omitempty"`
 	Update           LauncherUpdateInfo   `json:"update"`
+	CPAManagerUpdate LauncherUpdateInfo   `json:"cpaManagerUpdate"`
 	Logs             []LogEntry           `json:"logs"`
 }
 
