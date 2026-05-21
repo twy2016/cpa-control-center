@@ -559,6 +559,14 @@ func (a *App) UpdateLauncherCPA() (backend.LauncherStatusSnapshot, error) {
 	return service.UpdateLauncherCPA()
 }
 
+func (a *App) UpdateLauncherCPAManager() (backend.LauncherStatusSnapshot, error) {
+	service, err := a.ensureBackend()
+	if err != nil {
+		return backend.LauncherStatusSnapshot{}, err
+	}
+	return service.UpdateLauncherCPAManager()
+}
+
 func (a *App) GenerateLauncherConfig(input backend.LauncherConfigTemplateInput) (backend.LauncherStatusSnapshot, error) {
 	service, err := a.ensureBackend()
 	if err != nil {

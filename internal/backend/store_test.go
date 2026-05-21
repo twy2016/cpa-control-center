@@ -318,6 +318,9 @@ func TestLoadSettingsDefaultsLauncherSettingsWhenMissingFromLegacyFile(t *testin
 	if !settings.Launcher.MinimizeToTrayOnClose {
 		t.Fatal("expected legacy settings to default minimizeToTrayOnClose to true")
 	}
+	if settings.Launcher.CPAManagerLastInstalledVersion != embeddedCPAManagerVersion {
+		t.Fatalf("expected legacy settings to default CPA-Manager version %q, got %q", embeddedCPAManagerVersion, settings.Launcher.CPAManagerLastInstalledVersion)
+	}
 }
 
 func TestLoadSettingsDefaultsLauncherMinimizeToTrayWhenMissingFromLegacyLauncherBlock(t *testing.T) {
@@ -355,6 +358,9 @@ func TestLoadSettingsDefaultsLauncherMinimizeToTrayWhenMissingFromLegacyLauncher
 	}
 	if !settings.Launcher.MinimizeToTrayOnClose {
 		t.Fatal("expected legacy launcher settings to default minimizeToTrayOnClose to true")
+	}
+	if settings.Launcher.CPAManagerLastInstalledVersion != embeddedCPAManagerVersion {
+		t.Fatalf("expected legacy launcher settings to default CPA-Manager version %q, got %q", embeddedCPAManagerVersion, settings.Launcher.CPAManagerLastInstalledVersion)
 	}
 }
 

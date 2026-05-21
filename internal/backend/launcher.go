@@ -1,14 +1,17 @@
 package backend
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,36 +42,47 @@ const (
 	launcherRefreshInterval = 2500 * time.Millisecond
 	launcherProbeTimeout    = 2 * time.Second
 	launcherDownloadTimeout = 10 * time.Minute
+	maxCPAManagerPanelBytes = 50 * 1024 * 1024
 	defaultCPAListenPort    = 8317
+	defaultCPAManagerHost   = "127.0.0.1"
 
 	launcherUpdateSourceStartup = "startup"
 	launcherUpdateSourceManual  = "manual"
 )
 
 type launcherService struct {
-	store          *Store
-	logger         *Logger
-	emitter        EventEmitter
-	probeClient    *http.Client
-	downloadClient *http.Client
-	cpaManager     *cpamanager.Service
+	store             *Store
+	logger            *Logger
+	emitter           EventEmitter
+	probeClient       *http.Client
+	downloadClient    *http.Client
+	cpaManagerDataDir string
+	cpaManager        *cpamanager.Service
 
-	mu               sync.Mutex
-	cmd              *exec.Cmd
-	doneCh           chan struct{}
-	stopping         bool
-	lastStartError   string
-	logs             []LogEntry
-	update           LauncherUpdateInfo
-	cpaManagerUpdate LauncherUpdateInfo
-	stopCh           chan struct{}
+	mu                    sync.Mutex
+	cmd                   *exec.Cmd
+	doneCh                chan struct{}
+	stopping              bool
+	lastStartError        string
+	logs                  []LogEntry
+	update                LauncherUpdateInfo
+	cpaManagerUpdate      LauncherUpdateInfo
+	cpaManagerCmd         *exec.Cmd
+	cpaManagerDoneCh      chan struct{}
+	cpaManagerRuntime     cpamanager.RuntimeInfo
+	cpaManagerStartConfig cpamanager.StartConfig
+	stopCh                chan struct{}
 }
 
 type launcherReleaseInfo struct {
-	TagName          string
-	AssetDownloadURL string
-	AssetSize        int64
-	ReleaseURL       string
+	TagName               string
+	AssetName             string
+	AssetDownloadURL      string
+	AssetSize             int64
+	ReleaseURL            string
+	PanelAssetName        string
+	PanelAssetDownloadURL string
+	PanelAssetSize        int64
 }
 
 type launcherProxyDiagnostics struct {
@@ -95,8 +109,9 @@ func newLauncherService(store *Store, logger *Logger, emitter EventEmitter) *lau
 		downloadClient: &http.Client{
 			Timeout: launcherDownloadTimeout,
 		},
-		cpaManager: cpamanager.New(cpaManagerDataDir),
-		stopCh:     make(chan struct{}),
+		cpaManagerDataDir: cpaManagerDataDir,
+		cpaManager:        cpamanager.New(cpaManagerDataDir),
+		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -128,6 +143,7 @@ func (l *launcherService) Close() {
 	if l.cpaManager != nil {
 		_ = l.cpaManager.Stop(context.Background())
 	}
+	_, _ = l.stopExternalCPAManager()
 }
 
 func (l *launcherService) runStartupActions() {
@@ -149,9 +165,13 @@ func (l *launcherService) runStartupActions() {
 			} else if update.Available {
 				l.appendLog("info", fmt.Sprintf("%s 自动启动 CPA 将继续执行。", update.Message))
 			}
-		}
-		if _, managerUpdateErr := l.checkCPAManagerForUpdate(settings, true, launcherUpdateSourceStartup); managerUpdateErr != nil {
-			l.appendLog("warning", managerUpdateErr.Error())
+			if _, managerUpdateErr := l.updateCPAManagerIfAvailable(settings, true, launcherUpdateSourceStartup); managerUpdateErr != nil {
+				l.appendLog("warning", managerUpdateErr.Error())
+			}
+		} else {
+			if _, managerUpdateErr := l.checkCPAManagerForUpdate(settings, true, launcherUpdateSourceStartup); managerUpdateErr != nil {
+				l.appendLog("warning", managerUpdateErr.Error())
+			}
 		}
 	}
 
@@ -200,7 +220,7 @@ func (l *launcherService) Refresh() (LauncherStatusSnapshot, error) {
 	}
 
 	update := l.currentUpdate(settings.Launcher.LastInstalledVersion)
-	cpaManagerUpdate := l.currentCPAManagerUpdate()
+	cpaManagerUpdate := l.currentCPAManagerUpdate(currentCPAManagerVersion(settings.Launcher))
 
 	var (
 		runtimeInfo       *LauncherRuntimeInfo
@@ -528,6 +548,10 @@ func (l *launcherService) InstallLatest(targetDirectory string) (LauncherStatusS
 	l.mu.Unlock()
 	l.appendLog("info", fmt.Sprintf("CPA %s 安装完成，路径：%s。", release.TagName, executablePath))
 
+	if _, managerErr := l.updateCPAManagerIfAvailable(settings, true, launcherUpdateSourceManual); managerErr != nil {
+		l.appendLog("warning", fmt.Sprintf("CPA 已安装，但 CPA-Manager 更新失败: %v", managerErr))
+	}
+
 	snapshot, err := l.Refresh()
 	if err == nil {
 		l.emitStatus(snapshot)
@@ -613,10 +637,34 @@ func (l *launcherService) UpdateCPA() (LauncherStatusSnapshot, error) {
 	l.mu.Unlock()
 	l.appendLog("info", fmt.Sprintf("CPA 已更新到 %s。", release.TagName))
 
+	if _, managerErr := l.updateCPAManagerIfAvailable(settings, true, launcherUpdateSourceManual); managerErr != nil {
+		l.appendLog("warning", fmt.Sprintf("CPA 已更新，但 CPA-Manager 更新失败: %v", managerErr))
+	}
+
 	if updatePlan.ShouldRestart {
 		if _, err := l.StartService(); err != nil {
 			return LauncherStatusSnapshot{}, err
 		}
+	}
+
+	snapshot, err := l.Refresh()
+	if err == nil {
+		l.emitStatus(snapshot)
+	}
+	return snapshot, err
+}
+
+func (l *launcherService) UpdateCPAManager() (LauncherStatusSnapshot, error) {
+	settings, err := l.store.LoadSettings()
+	if err != nil {
+		return LauncherStatusSnapshot{}, err
+	}
+	if strings.TrimSpace(settings.Launcher.ExecutablePath) == "" {
+		return LauncherStatusSnapshot{}, errors.New("请先配置 CPA 可执行文件路径")
+	}
+
+	if _, err := l.updateCPAManagerIfAvailable(settings, false, launcherUpdateSourceManual); err != nil {
+		return LauncherStatusSnapshot{}, err
 	}
 
 	snapshot, err := l.Refresh()
@@ -721,15 +769,19 @@ func (l *launcherService) currentUpdate(currentVersion string) LauncherUpdateInf
 	return update
 }
 
-func (l *launcherService) currentCPAManagerUpdate() LauncherUpdateInfo {
+func (l *launcherService) currentCPAManagerUpdate(currentVersion string) LauncherUpdateInfo {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	update := l.cpaManagerUpdate
 	if strings.TrimSpace(update.CurrentVersion) == "" {
-		update.CurrentVersion = embeddedCPAManagerVersion
+		update.CurrentVersion = currentVersion
 	}
 	return update
+}
+
+func currentCPAManagerVersion(settings LauncherSettings) string {
+	return stringOr(settings.CPAManagerLastInstalledVersion, embeddedCPAManagerVersion)
 }
 
 func launcherStartupShouldBlockAutoStart(update LauncherUpdateInfo) bool {
@@ -945,17 +997,26 @@ func (l *launcherService) waitForServiceReady(settings AppSettings, info Launche
 }
 
 func (l *launcherService) startCPAManager(ctx context.Context, settings AppSettings, info LauncherRuntimeInfo) (cpamanager.RuntimeInfo, error) {
+	managementKey, _, skippedHashedKey := resolveLauncherManagementKey(settings, info)
+	startConfig := normalizeCPAManagerStartConfig(cpamanager.StartConfig{
+		CPAUpstreamURL: info.BaseURL,
+		ManagementKey:  managementKey,
+	})
+
+	runtimeInfo, external, err := l.startExternalCPAManager(ctx, startConfig)
+	if err != nil {
+		l.appendLog("warning", fmt.Sprintf("启动外部 CPA-Manager 失败，将回退到内嵌 Usage Service: %v", err))
+	} else if external {
+		l.logCPAManagerStarted(runtimeInfo, managementKey, skippedHashedKey, info, "外部")
+		return runtimeInfo, nil
+	}
+
 	if l.cpaManager == nil {
 		return cpamanager.RuntimeInfo{}, errors.New("CPA-Manager 服务未初始化")
 	}
 
 	previousRuntime, wasRunning := l.cpaManager.Runtime()
-	managementKey, _, skippedHashedKey := resolveLauncherManagementKey(settings, info)
-
-	runtimeInfo, err := l.cpaManager.Start(ctx, cpamanager.StartConfig{
-		CPAUpstreamURL: info.BaseURL,
-		ManagementKey:  managementKey,
-	})
+	runtimeInfo, err = l.cpaManager.Start(ctx, startConfig)
 	if err != nil {
 		return cpamanager.RuntimeInfo{}, fmt.Errorf("启动 CPA-Manager 失败: %w", err)
 	}
@@ -965,6 +1026,11 @@ func (l *launcherService) startCPAManager(ctx context.Context, settings AppSetti
 		return runtimeInfo, nil
 	}
 
+	l.logCPAManagerStarted(runtimeInfo, managementKey, skippedHashedKey, info, "内嵌")
+	return runtimeInfo, nil
+}
+
+func (l *launcherService) logCPAManagerStarted(runtimeInfo cpamanager.RuntimeInfo, managementKey string, skippedHashedKey bool, info LauncherRuntimeInfo, mode string) {
 	if managementKey == "" {
 		if skippedHashedKey {
 			l.appendLog("warning", "检测到 CPA 配置中的 remote-management.secret-key 是哈希值，不能作为 Usage Service 管理密钥使用；请在设置页保存登录 CPA 面板时使用的明文管理令牌，或在 CPA 面板中首次配置 Usage Service。")
@@ -976,8 +1042,11 @@ func (l *launcherService) startCPAManager(ctx context.Context, settings AppSetti
 		l.appendLog("warning", "当前 CPA config.yaml 未启用 usage-statistics-enabled，CPA-Manager 请求统计可能没有数据。")
 	}
 
+	if strings.TrimSpace(mode) != "" {
+		l.appendLog("info", fmt.Sprintf("CPA-Manager Usage Service 已启动（%s）：%s。", mode, runtimeInfo.BaseURL))
+		return
+	}
 	l.appendLog("info", fmt.Sprintf("CPA-Manager Usage Service 已启动：%s。", runtimeInfo.BaseURL))
-	return runtimeInfo, nil
 }
 
 func resolveLauncherManagementKey(settings AppSettings, info LauncherRuntimeInfo) (string, string, bool) {
@@ -1013,13 +1082,11 @@ func isBcryptManagementSecret(value string) bool {
 }
 
 func (l *launcherService) ensureCPAManagerPanel(info LauncherRuntimeInfo) {
-	if strings.TrimSpace(info.ConfigPath) != "" {
-		changed, err := ensureCPAManagerPanelRepository(info.ConfigPath)
-		if err != nil {
-			l.appendLog("warning", fmt.Sprintf("更新 CPA 管理面板仓库配置失败: %v", err))
-		} else if changed {
-			l.appendLog("info", fmt.Sprintf("已将 CPA 管理面板仓库切换为 %s。", defaultCPAManagerPanelRepo))
-		}
+	if err := l.ensureCPAManagerPanelConfig(LauncherSettings{
+		ExecutablePath: info.ExecutablePath,
+		ConfigPath:     info.ConfigPath,
+	}); err != nil {
+		l.appendLog("warning", err.Error())
 	}
 
 	action, err := ensureCPAManagerPanelAsset(info.ExecutableDirectory)
@@ -1033,6 +1100,25 @@ func (l *launcherService) ensureCPAManagerPanel(info LauncherRuntimeInfo) {
 	case "removed":
 		l.appendLog("info", "已移除旧 CPA 管理面板缓存，CPA 下次启动会重新下载 CPA-Manager 面板。")
 	}
+}
+
+func (l *launcherService) ensureCPAManagerPanelConfig(settings LauncherSettings) error {
+	configPath, err := resolveLauncherConfigPathForRead(settings.ConfigPath, settings.ExecutablePath)
+	if err != nil {
+		return fmt.Errorf("更新 CPA 管理面板仓库配置失败: %w", err)
+	}
+	if strings.TrimSpace(configPath) == "" {
+		return nil
+	}
+
+	changed, err := ensureCPAManagerPanelRepository(configPath)
+	if err != nil {
+		return fmt.Errorf("更新 CPA 管理面板仓库配置失败: %w", err)
+	}
+	if changed {
+		l.appendLog("info", fmt.Sprintf("已将 CPA 管理面板仓库切换为 %s。", defaultCPAManagerPanelRepo))
+	}
+	return nil
 }
 
 func ensureCPAManagerPanelRepository(configPath string) (bool, error) {
@@ -1200,27 +1286,65 @@ func panelSupportsUsageService(path string) bool {
 	if err != nil {
 		return false
 	}
+	return panelSupportsUsageServiceData(data)
+}
+
+func panelSupportsUsageServiceData(data []byte) bool {
 	return bytes.Contains(data, []byte("externalUsageService")) ||
 		bytes.Contains(data, []byte("Usage Service")) ||
 		bytes.Contains(data, []byte("CPA-Manager"))
 }
 
 func (l *launcherService) stopCPAManager() error {
+	stopped := false
+	var firstErr error
+
+	if externalStopped, err := l.stopExternalCPAManager(); err != nil {
+		firstErr = err
+	} else if externalStopped {
+		stopped = true
+	}
+
 	if l.cpaManager == nil {
+		if firstErr != nil {
+			return firstErr
+		}
+		if stopped {
+			l.appendLog("info", "CPA-Manager 已停止。")
+		}
 		return nil
 	}
-	if _, ok := l.cpaManager.Runtime(); !ok {
-		return nil
+	if _, ok := l.cpaManager.Runtime(); ok {
+		if err := l.cpaManager.Stop(context.Background()); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("停止 CPA-Manager 失败: %w", err)
+		} else if err == nil {
+			stopped = true
+		}
 	}
-	if err := l.cpaManager.Stop(context.Background()); err != nil {
-		return fmt.Errorf("停止 CPA-Manager 失败: %w", err)
+	if firstErr != nil {
+		return firstErr
 	}
-	l.appendLog("info", "CPA-Manager 已停止。")
+	if stopped {
+		l.appendLog("info", "CPA-Manager 已停止。")
+	}
 	return nil
 }
 
 func (l *launcherService) attachCPAManagerRuntime(info *LauncherRuntimeInfo) {
-	if info == nil || l.cpaManager == nil {
+	if info == nil {
+		return
+	}
+	l.mu.Lock()
+	externalRuntime := l.cpaManagerRuntime
+	externalRunning := l.cpaManagerCmd != nil
+	l.mu.Unlock()
+	if externalRunning {
+		info.CPAManagerURL = externalRuntime.BaseURL
+		info.CPAManagerHealthURL = externalRuntime.HealthURL
+		info.CPAManagerDBPath = externalRuntime.DBPath
+		return
+	}
+	if l.cpaManager == nil {
 		return
 	}
 	runtimeInfo, ok := l.cpaManager.Runtime()
@@ -1230,6 +1354,280 @@ func (l *launcherService) attachCPAManagerRuntime(info *LauncherRuntimeInfo) {
 	info.CPAManagerURL = runtimeInfo.BaseURL
 	info.CPAManagerHealthURL = runtimeInfo.HealthURL
 	info.CPAManagerDBPath = runtimeInfo.DBPath
+}
+
+func (l *launcherService) startExternalCPAManager(ctx context.Context, input cpamanager.StartConfig) (cpamanager.RuntimeInfo, bool, error) {
+	executablePath := l.cpaManagerExecutablePath()
+	if strings.TrimSpace(executablePath) == "" {
+		return cpamanager.RuntimeInfo{}, false, nil
+	}
+	if _, err := os.Stat(executablePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cpamanager.RuntimeInfo{}, false, nil
+		}
+		return cpamanager.RuntimeInfo{}, true, err
+	}
+
+	startConfig := normalizeCPAManagerStartConfig(input)
+	l.mu.Lock()
+	if l.cpaManagerCmd != nil && sameCPAManagerStartConfig(l.cpaManagerStartConfig, startConfig) {
+		runtimeInfo := l.cpaManagerRuntime
+		l.mu.Unlock()
+		if l.probeService(runtimeInfo.HealthURL) {
+			return runtimeInfo, true, nil
+		}
+	} else {
+		l.mu.Unlock()
+	}
+
+	if _, err := l.stopExternalCPAManager(); err != nil {
+		return cpamanager.RuntimeInfo{}, true, err
+	}
+	if l.cpaManager != nil {
+		_ = l.cpaManager.Stop(context.Background())
+	}
+	if stalePID, _ := findLauncherProcessPIDByExecutablePath(executablePath); stalePID > 0 {
+		l.appendLog("info", fmt.Sprintf("检测到旧 CPA-Manager 进程，PID=%d，正在停止。", stalePID))
+		if err := killProcessTreeByPID(stalePID); err != nil {
+			return cpamanager.RuntimeInfo{}, true, fmt.Errorf("停止旧 CPA-Manager 进程失败: %w", err)
+		}
+		if !waitForProcessExitByPID(stalePID, 5*time.Second) {
+			return cpamanager.RuntimeInfo{}, true, errors.New("等待旧 CPA-Manager 进程退出超时")
+		}
+	}
+
+	httpAddr, baseURL, err := reserveCPAManagerHTTPAddr(startConfig.HTTPHost, startConfig.HTTPPort)
+	if err != nil {
+		return cpamanager.RuntimeInfo{}, true, err
+	}
+
+	if err := ensureDir(l.cpaManagerDataDir); err != nil {
+		return cpamanager.RuntimeInfo{}, true, err
+	}
+	cmd := exec.CommandContext(ctx, filepath.Clean(executablePath))
+	cmd.Dir = filepath.Dir(executablePath)
+	cmd.Env = cpaManagerCommandEnv(os.Environ(), l.cpaManagerDataDir, httpAddr, startConfig.CPAUpstreamURL, startConfig.ManagementKey)
+	configureLauncherCommand(cmd)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return cpamanager.RuntimeInfo{}, true, fmt.Errorf("创建 CPA-Manager stdout 管道失败: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return cpamanager.RuntimeInfo{}, true, fmt.Errorf("创建 CPA-Manager stderr 管道失败: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return cpamanager.RuntimeInfo{}, true, err
+	}
+
+	runtimeInfo := cpamanager.RuntimeInfo{
+		HTTPAddr:      httpAddr,
+		BaseURL:       baseURL,
+		ManagementURL: baseURL + "/management.html",
+		HealthURL:     baseURL + "/health",
+		DBPath:        filepath.Join(l.cpaManagerDataDir, "usage.sqlite"),
+	}
+	doneCh := make(chan struct{})
+	l.mu.Lock()
+	l.cpaManagerCmd = cmd
+	l.cpaManagerDoneCh = doneCh
+	l.cpaManagerRuntime = runtimeInfo
+	l.cpaManagerStartConfig = startConfig
+	l.mu.Unlock()
+
+	go l.captureProcessOutput("cpa-manager stdout", stdout)
+	go l.captureProcessOutput("cpa-manager stderr", stderr)
+	go l.waitForCPAManagerExit(cmd, doneCh)
+
+	if !l.waitForCPAManagerReady(runtimeInfo.HealthURL, 5*time.Second) {
+		_, _ = l.stopExternalCPAManager()
+		return cpamanager.RuntimeInfo{}, true, errors.New("等待 CPA-Manager 健康检查超时")
+	}
+
+	return runtimeInfo, true, nil
+}
+
+func (l *launcherService) stopExternalCPAManager() (bool, error) {
+	l.mu.Lock()
+	cmd := l.cpaManagerCmd
+	doneCh := l.cpaManagerDoneCh
+	pid := 0
+	if cmd != nil && cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	l.mu.Unlock()
+
+	if cmd == nil {
+		return false, nil
+	}
+
+	if err := killProcessTree(cmd); err != nil {
+		select {
+		case <-doneCh:
+		default:
+			return false, fmt.Errorf("停止外部 CPA-Manager 失败: %w", err)
+		}
+	}
+
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		return false, errors.New("等待外部 CPA-Manager 退出超时")
+	}
+
+	if pid > 0 {
+		l.appendLog("info", fmt.Sprintf("外部 CPA-Manager 进程已停止，PID=%d。", pid))
+	}
+	return true, nil
+}
+
+func (l *launcherService) waitForCPAManagerExit(cmd *exec.Cmd, doneCh chan struct{}) {
+	err := cmd.Wait()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+
+	l.mu.Lock()
+	if l.cpaManagerCmd == cmd {
+		l.cpaManagerCmd = nil
+		l.cpaManagerDoneCh = nil
+		l.cpaManagerRuntime = cpamanager.RuntimeInfo{}
+		l.cpaManagerStartConfig = cpamanager.StartConfig{}
+	}
+	close(doneCh)
+	l.mu.Unlock()
+
+	l.appendLog("info", fmt.Sprintf("外部 CPA-Manager 进程已退出，ExitCode=%d。", exitCode))
+	l.refreshAndEmit()
+}
+
+func (l *launcherService) waitForCPAManagerReady(healthURL string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if l.probeService(healthURL) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+func (l *launcherService) cpaManagerExecutablePath() string {
+	dataDir := strings.TrimSpace(l.cpaManagerDataDir)
+	if dataDir == "" {
+		dataDir = filepathJoin(".", "cpa-manager")
+	}
+	return filepath.Join(dataDir, "bin", cpaManagerExecutableName())
+}
+
+func (l *launcherService) cpaManagerExecutableExists() bool {
+	if _, err := os.Stat(l.cpaManagerExecutablePath()); err == nil {
+		return true
+	}
+	return false
+}
+
+func (l *launcherService) isCPAManagerRunning() bool {
+	l.mu.Lock()
+	externalRunning := l.cpaManagerCmd != nil
+	l.mu.Unlock()
+	if externalRunning {
+		return true
+	}
+	if l.cpaManager == nil {
+		return false
+	}
+	_, running := l.cpaManager.Runtime()
+	return running
+}
+
+func (l *launcherService) restartCPAManagerIfPossible(settings AppSettings) {
+	info, err := inspectLauncherRuntime(settings.Launcher.ExecutablePath, settings.Launcher.ConfigPath)
+	if err != nil {
+		l.appendLog("warning", fmt.Sprintf("CPA-Manager 更新后重启失败: %v", err))
+		return
+	}
+	if !l.probeService(info.ServiceProbeURL) {
+		return
+	}
+	if _, err := l.startCPAManager(context.Background(), settings, info); err != nil {
+		l.appendLog("warning", fmt.Sprintf("CPA-Manager 更新后重启失败: %v", err))
+	}
+}
+
+func cpaManagerExecutableName() string {
+	if currentGOOS() == "windows" {
+		return "cpa-manager.exe"
+	}
+	return "cpa-manager"
+}
+
+func reserveCPAManagerHTTPAddr(host string, firstPort int) (string, string, error) {
+	startConfig := normalizeCPAManagerStartConfig(cpamanager.StartConfig{HTTPHost: host, HTTPPort: firstPort})
+	var lastErr error
+	for port := startConfig.HTTPPort; port < startConfig.HTTPPort+10; port++ {
+		addr := fmt.Sprintf("%s:%d", startConfig.HTTPHost, port)
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = listener.Close()
+		return addr, fmt.Sprintf("http://%s:%d", startConfig.HTTPHost, port), nil
+	}
+	return "", "", fmt.Errorf("未找到可用的 CPA-Manager 端口: %w", lastErr)
+}
+
+func normalizeCPAManagerStartConfig(input cpamanager.StartConfig) cpamanager.StartConfig {
+	output := cpamanager.StartConfig{
+		CPAUpstreamURL: strings.TrimRight(strings.TrimSpace(input.CPAUpstreamURL), "/"),
+		ManagementKey:  strings.TrimSpace(input.ManagementKey),
+		HTTPHost:       strings.TrimSpace(input.HTTPHost),
+		HTTPPort:       input.HTTPPort,
+	}
+	if output.HTTPHost == "" {
+		output.HTTPHost = defaultCPAManagerHost
+	}
+	if output.HTTPPort <= 0 {
+		output.HTTPPort = cpamanager.DefaultHTTPPort
+	}
+	return output
+}
+
+func sameCPAManagerStartConfig(left cpamanager.StartConfig, right cpamanager.StartConfig) bool {
+	return strings.TrimRight(strings.TrimSpace(left.CPAUpstreamURL), "/") == strings.TrimRight(strings.TrimSpace(right.CPAUpstreamURL), "/") &&
+		strings.TrimSpace(left.ManagementKey) == strings.TrimSpace(right.ManagementKey) &&
+		strings.TrimSpace(left.HTTPHost) == strings.TrimSpace(right.HTTPHost) &&
+		left.HTTPPort == right.HTTPPort
+}
+
+func cpaManagerCommandEnv(base []string, dataDir string, httpAddr string, cpaUpstreamURL string, managementKey string) []string {
+	env := append([]string{}, base...)
+	env = upsertEnv(env, "HTTP_ADDR", httpAddr)
+	env = upsertEnv(env, "USAGE_DATA_DIR", dataDir)
+	env = upsertEnv(env, "USAGE_DB_PATH", filepath.Join(dataDir, "usage.sqlite"))
+	env = upsertEnv(env, "CPA_UPSTREAM_URL", cpaUpstreamURL)
+	env = upsertEnv(env, "CPA_MANAGEMENT_KEY", managementKey)
+	env = upsertEnv(env, "USAGE_CORS_ORIGINS", "*")
+	env = upsertEnv(env, "CPA_MANAGER_CONFIG", "")
+	return env
+}
+
+func upsertEnv(env []string, key string, value string) []string {
+	prefix := key + "="
+	for index, item := range env {
+		if strings.EqualFold(strings.SplitN(item, "=", 2)[0], key) {
+			env[index] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 func (l *launcherService) checkForUpdate(settings AppSettings, silent bool, source string) (LauncherUpdateInfo, error) {
@@ -1290,9 +1688,14 @@ func (l *launcherService) checkCPAManagerForUpdate(settings AppSettings, silent 
 		return LauncherUpdateInfo{}, err
 	}
 
-	release, err := l.fetchLatestReleaseMetadata(defaultCPAManagerRepo, embeddedCPAManagerVersion, diagnostics.EffectiveProxyURL, "CPA-Manager")
+	currentVersion := currentCPAManagerVersion(settings.Launcher)
+	compareVersion := currentVersion
+	if !l.cpaManagerExecutableExists() {
+		compareVersion = ""
+	}
+	release, err := l.fetchLatestCPAManagerRelease(defaultCPAManagerRepo, compareVersion, diagnostics.EffectiveProxyURL)
 	update := LauncherUpdateInfo{
-		CurrentVersion: embeddedCPAManagerVersion,
+		CurrentVersion: currentVersion,
 		CheckedAt:      nowISO(),
 		CheckSource:    source,
 	}
@@ -1320,8 +1723,143 @@ func (l *launcherService) checkCPAManagerForUpdate(settings AppSettings, silent 
 	update.Available = true
 	update.TagName = release.TagName
 	update.ReleaseURL = release.ReleaseURL
-	update.Message = fmt.Sprintf("CPA-Manager 上游最新版本为 %s；当前 Usage Service 随 Control Center 内嵌更新。", release.TagName)
+	update.Message = fmt.Sprintf("发现 CPA-Manager 新版本 %s。", release.TagName)
 
+	l.mu.Lock()
+	l.cpaManagerUpdate = update
+	l.mu.Unlock()
+	if !silent {
+		l.appendLog("info", update.Message)
+	}
+	l.emitStatusIfPossible()
+	return update, nil
+}
+
+func (l *launcherService) updateCPAManagerIfAvailable(settings AppSettings, silent bool, source string) (LauncherUpdateInfo, error) {
+	if strings.TrimSpace(settings.Launcher.ExecutablePath) == "" {
+		return LauncherUpdateInfo{}, errors.New("请先配置 CPA 可执行文件路径")
+	}
+
+	diagnostics, err := launcherProxyDiagnosticsFromSettings(settings.Launcher, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", defaultCPAManagerRepo))
+	if err != nil {
+		return LauncherUpdateInfo{}, err
+	}
+	if !silent {
+		l.appendLog("info", launcherProxyDiagnosticsMessage(diagnostics))
+	}
+
+	currentVersion := currentCPAManagerVersion(settings.Launcher)
+	compareVersion := currentVersion
+	if !l.cpaManagerExecutableExists() {
+		compareVersion = ""
+	}
+	release, err := l.fetchLatestCPAManagerRelease(defaultCPAManagerRepo, compareVersion, diagnostics.EffectiveProxyURL)
+	update := LauncherUpdateInfo{
+		CurrentVersion: currentVersion,
+		CheckedAt:      nowISO(),
+		CheckSource:    source,
+	}
+	if err != nil {
+		update.Message = err.Error()
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		l.emitStatusIfPossible()
+		return update, err
+	}
+
+	if release == nil {
+		update.Message = "CPA-Manager 已是最新版本。"
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		if !silent {
+			l.appendLog("info", update.Message)
+		}
+		l.emitStatusIfPossible()
+		return update, nil
+	}
+
+	update.Available = true
+	update.TagName = release.TagName
+	update.AssetSize = release.AssetSize
+	update.ReleaseURL = release.ReleaseURL
+	update.Message = fmt.Sprintf("发现 CPA-Manager 新版本 %s。", release.TagName)
+	l.mu.Lock()
+	l.cpaManagerUpdate = update
+	l.mu.Unlock()
+	l.emitStatusIfPossible()
+
+	if !silent {
+		l.appendLog("info", fmt.Sprintf("开始更新 CPA-Manager 到 %s。", release.TagName))
+	}
+	if err := l.ensureCPAManagerPanelConfig(settings.Launcher); err != nil {
+		update.Message = fmt.Sprintf("CPA-Manager 更新失败: %v", err)
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		l.emitStatusIfPossible()
+		return update, err
+	}
+
+	wasRunning := l.isCPAManagerRunning()
+	if wasRunning {
+		if err := l.stopCPAManager(); err != nil {
+			update.Message = fmt.Sprintf("CPA-Manager 更新失败: %v", err)
+			l.mu.Lock()
+			l.cpaManagerUpdate = update
+			l.mu.Unlock()
+			l.emitStatusIfPossible()
+			return update, err
+		}
+	}
+	if err := l.downloadAndInstallCPAManagerBinary(release, diagnostics.EffectiveProxyURL); err != nil {
+		update.Message = fmt.Sprintf("CPA-Manager 更新失败: %v", err)
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		if wasRunning {
+			l.restartCPAManagerIfPossible(settings)
+		}
+		l.emitStatusIfPossible()
+		return update, err
+	}
+	if strings.TrimSpace(release.PanelAssetDownloadURL) != "" {
+		if err := l.downloadAndInstallCPAManagerPanel(settings.Launcher.ExecutablePath, release, diagnostics.EffectiveProxyURL); err != nil {
+			update.Message = fmt.Sprintf("CPA-Manager 管理面板更新失败: %v", err)
+			l.mu.Lock()
+			l.cpaManagerUpdate = update
+			l.mu.Unlock()
+			if wasRunning {
+				l.restartCPAManagerIfPossible(settings)
+			}
+			l.emitStatusIfPossible()
+			return update, err
+		}
+	} else if !silent {
+		l.appendLog("warning", "CPA-Manager 发布包没有 management.html 资产，仅更新外部 Usage Service。")
+	}
+
+	settings.Launcher.CPAManagerLastInstalledVersion = release.TagName
+	if _, err := l.store.SaveSettings(settings); err != nil {
+		update.Message = fmt.Sprintf("CPA-Manager 更新失败: %v", err)
+		l.mu.Lock()
+		l.cpaManagerUpdate = update
+		l.mu.Unlock()
+		if wasRunning {
+			l.restartCPAManagerIfPossible(settings)
+		}
+		l.emitStatusIfPossible()
+		return update, err
+	}
+
+	if wasRunning {
+		l.restartCPAManagerIfPossible(settings)
+	}
+
+	update.Available = false
+	update.CurrentVersion = release.TagName
+	update.Message = fmt.Sprintf("CPA-Manager 已更新到 %s。", release.TagName)
 	l.mu.Lock()
 	l.cpaManagerUpdate = update
 	l.mu.Unlock()
@@ -1455,6 +1993,144 @@ func (l *launcherService) fetchLatestReleaseMetadata(repo string, currentVersion
 		TagName:    payload.TagName,
 		ReleaseURL: payload.HTMLURL,
 	}, nil
+}
+
+func (l *launcherService) fetchLatestCPAManagerRelease(repo string, currentVersion string, proxyURL string) (*launcherReleaseInfo, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		repo = defaultCPAManagerRepo
+	}
+
+	requestURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
+	request, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", "CPA-Control-Center")
+	request.Header.Set("Accept", "application/vnd.github+json")
+
+	client, proxyLabel, err := l.downloadClientForProxy(proxyURL, request.URL.String())
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		if proxyLabel != "" {
+			return nil, fmt.Errorf("获取 CPA-Manager 最新版本失败（%s）: %w", proxyLabel, err)
+		}
+		return nil, fmt.Errorf("获取 CPA-Manager 最新版本失败: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("获取 CPA-Manager 最新版本失败: HTTP %d", response.StatusCode)
+	}
+
+	var payload struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+		Assets  []struct {
+			Name               string `json:"name"`
+			BrowserDownloadURL string `json:"browser_download_url"`
+			Size               int64  `json:"size"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("解析 CPA-Manager 发布信息失败: %w", err)
+	}
+	if strings.TrimSpace(payload.TagName) == "" {
+		return nil, errors.New("CPA-Manager 发布信息缺少版本号")
+	}
+
+	if compareVersions(strings.TrimSpace(currentVersion), strings.TrimSpace(payload.TagName)) >= 0 {
+		return nil, nil
+	}
+
+	nativeAsset := selectCPAManagerNativeAsset(payload.Assets)
+	if nativeAsset == nil {
+		return nil, errors.New("未找到适用于当前平台的 CPA-Manager 原生发布包")
+	}
+	panelAsset := selectCPAManagerPanelAsset(payload.Assets)
+
+	release := &launcherReleaseInfo{
+		TagName:          payload.TagName,
+		AssetName:        nativeAsset.Name,
+		AssetDownloadURL: nativeAsset.BrowserDownloadURL,
+		AssetSize:        nativeAsset.Size,
+		ReleaseURL:       payload.HTMLURL,
+	}
+	if panelAsset != nil {
+		release.PanelAssetName = panelAsset.Name
+		release.PanelAssetDownloadURL = panelAsset.BrowserDownloadURL
+		release.PanelAssetSize = panelAsset.Size
+	}
+	return release, nil
+}
+
+func selectCPAManagerNativeAsset(assets []struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+}) *struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+} {
+	targetOSTokens := []string{currentGOOS()}
+	targetArchTokens := []string{currentGOARCH()}
+
+	switch currentGOOS() {
+	case "windows":
+		targetOSTokens = []string{"windows", "win"}
+	case "darwin":
+		targetOSTokens = []string{"darwin", "mac", "macos"}
+	case "linux":
+		targetOSTokens = []string{"linux"}
+	}
+
+	switch currentGOARCH() {
+	case "amd64":
+		targetArchTokens = []string{"amd64", "x64", "x86_64"}
+	case "arm64":
+		targetArchTokens = []string{"arm64", "aarch64"}
+	}
+
+	for index := range assets {
+		name := strings.ToLower(strings.TrimSpace(assets[index].Name))
+		if !strings.Contains(name, "cpa-manager") {
+			continue
+		}
+		if !strings.HasSuffix(name, ".zip") && !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".tgz") {
+			continue
+		}
+		if !containsAnyToken(name, targetOSTokens) || !containsAnyToken(name, targetArchTokens) {
+			continue
+		}
+		return &assets[index]
+	}
+	return nil
+}
+
+func selectCPAManagerPanelAsset(assets []struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+}) *struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+} {
+	for index := range assets {
+		name := strings.ToLower(strings.TrimSpace(assets[index].Name))
+		if name == "management.html" || strings.HasSuffix(name, "/management.html") {
+			return &assets[index]
+		}
+		if strings.HasSuffix(name, ".html") && strings.Contains(name, "management") {
+			return &assets[index]
+		}
+	}
+	return nil
 }
 
 func selectReleaseAsset(assets []struct {
@@ -1670,6 +2346,118 @@ func (l *launcherService) downloadAndReplaceExecutable(targetExecutablePath stri
 	return nil
 }
 
+func (l *launcherService) downloadAndInstallCPAManagerBinary(release *launcherReleaseInfo, proxyURL string) error {
+	if release == nil || strings.TrimSpace(release.AssetDownloadURL) == "" {
+		return errors.New("CPA-Manager 发布信息缺少原生包下载地址")
+	}
+
+	archivePath, err := l.downloadReleaseAssetToTemp(release.AssetDownloadURL, proxyURL, "CPA-Manager 原生发布包")
+	if err != nil {
+		return err
+	}
+	defer tryDeleteFile(archivePath)
+
+	targetExecutablePath := l.cpaManagerExecutablePath()
+	targetDirectory := filepath.Dir(targetExecutablePath)
+	if err := ensureDir(targetDirectory); err != nil {
+		return err
+	}
+
+	tempExecutable := filepath.Join(targetDirectory, fmt.Sprintf("cpa-manager-update-%d%s", time.Now().UnixNano(), filepath.Ext(targetExecutablePath)))
+	defer tryDeleteFile(tempExecutable)
+
+	assetName := strings.ToLower(strings.TrimSpace(release.AssetName))
+	switch {
+	case strings.HasSuffix(assetName, ".zip"):
+		if err := extractCPAManagerBinaryFromZip(archivePath, tempExecutable); err != nil {
+			return err
+		}
+	case strings.HasSuffix(assetName, ".tar.gz") || strings.HasSuffix(assetName, ".tgz"):
+		if err := extractCPAManagerBinaryFromTarGz(archivePath, tempExecutable); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("不支持的 CPA-Manager 原生包格式: %s", release.AssetName)
+	}
+
+	if err := os.Chmod(tempExecutable, 0o755); err != nil {
+		return fmt.Errorf("设置 CPA-Manager 可执行权限失败: %w", err)
+	}
+
+	backupExecutable := targetExecutablePath + ".bak"
+	if _, err := os.Stat(targetExecutablePath); err == nil {
+		tryDeleteFile(backupExecutable)
+		if err := os.Rename(targetExecutablePath, backupExecutable); err != nil {
+			return fmt.Errorf("备份旧的 CPA-Manager 可执行文件失败: %w", err)
+		}
+	}
+
+	if err := os.Rename(tempExecutable, targetExecutablePath); err != nil {
+		if _, statErr := os.Stat(backupExecutable); statErr == nil {
+			_ = os.Rename(backupExecutable, targetExecutablePath)
+		}
+		return fmt.Errorf("替换 CPA-Manager 可执行文件失败: %w", err)
+	}
+
+	tryDeleteFile(backupExecutable)
+	return nil
+}
+
+func (l *launcherService) downloadAndInstallCPAManagerPanel(targetExecutablePath string, release *launcherReleaseInfo, proxyURL string) error {
+	if release == nil || strings.TrimSpace(release.PanelAssetDownloadURL) == "" {
+		return errors.New("CPA-Manager 发布信息缺少 management.html 下载地址")
+	}
+
+	request, err := http.NewRequest(http.MethodGet, release.PanelAssetDownloadURL, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("User-Agent", "CPA-Control-Center")
+
+	client, proxyLabel, err := l.downloadClientForProxy(proxyURL, request.URL.String())
+	if err != nil {
+		return err
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		if proxyLabel != "" {
+			return fmt.Errorf("下载 CPA-Manager 管理面板失败（%s）: %w", proxyLabel, err)
+		}
+		return fmt.Errorf("下载 CPA-Manager 管理面板失败: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("下载 CPA-Manager 管理面板失败: HTTP %d", response.StatusCode)
+	}
+
+	limitedReader := io.LimitReader(response.Body, maxCPAManagerPanelBytes+1)
+	data, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return fmt.Errorf("读取 CPA-Manager 管理面板失败: %w", err)
+	}
+	if len(data) > maxCPAManagerPanelBytes {
+		return errors.New("CPA-Manager 管理面板文件超过大小限制")
+	}
+	if !panelSupportsUsageServiceData(data) {
+		return errors.New("下载的 CPA-Manager 管理面板不包含 Usage Service 支持标记")
+	}
+
+	targetExecutablePath = strings.TrimSpace(targetExecutablePath)
+	if targetExecutablePath == "" {
+		return errors.New("CPA 可执行文件路径不能为空")
+	}
+	staticPanelPath := filepath.Join(filepath.Dir(targetExecutablePath), "static", "management.html")
+	if err := ensureDir(filepath.Dir(staticPanelPath)); err != nil {
+		return err
+	}
+	if err := os.WriteFile(staticPanelPath, data, 0o644); err != nil {
+		return fmt.Errorf("写入 CPA-Manager 管理面板失败: %w", err)
+	}
+	return nil
+}
+
 func (l *launcherService) downloadReleaseArchive(release *launcherReleaseInfo, proxyURL string) (string, error) {
 	request, err := http.NewRequest(http.MethodGet, release.AssetDownloadURL, nil)
 	if err != nil {
@@ -1706,6 +2494,43 @@ func (l *launcherService) downloadReleaseArchive(release *launcherReleaseInfo, p
 		return "", fmt.Errorf("写入 CPA 安装包失败: %w", err)
 	}
 	return archivePath, nil
+}
+
+func (l *launcherService) downloadReleaseAssetToTemp(downloadURL string, proxyURL string, label string) (string, error) {
+	request, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("User-Agent", "CPA-Control-Center")
+
+	client, proxyLabel, err := l.downloadClientForProxy(proxyURL, request.URL.String())
+	if err != nil {
+		return "", err
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		if proxyLabel != "" {
+			return "", fmt.Errorf("下载 %s 失败（%s）: %w", label, proxyLabel, err)
+		}
+		return "", fmt.Errorf("下载 %s 失败: %w", label, err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("下载 %s 失败: HTTP %d", label, response.StatusCode)
+	}
+
+	file, err := os.CreateTemp("", "cpa-control-center-*")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, response.Body); err != nil {
+		return "", fmt.Errorf("写入 %s 失败: %w", label, err)
+	}
+	return file.Name(), nil
 }
 
 func launcherProxyURLFromSettings(settings LauncherSettings) (string, error) {
@@ -1901,6 +2726,71 @@ func extractZipFile(file *zip.File, destinationPath string) error {
 	return nil
 }
 
+func extractCPAManagerBinaryFromZip(archivePath string, destinationPath string) error {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return fmt.Errorf("打开 CPA-Manager 原生包失败: %w", err)
+	}
+	defer reader.Close()
+
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		if !isCPAManagerExecutableName(filepath.Base(file.Name)) {
+			continue
+		}
+		return extractZipFile(file, destinationPath)
+	}
+	return errors.New("CPA-Manager 原生包中未找到 cpa-manager 可执行文件")
+}
+
+func extractCPAManagerBinaryFromTarGz(archivePath string, destinationPath string) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("打开 CPA-Manager 原生包失败: %w", err)
+	}
+	defer file.Close()
+
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("解压 CPA-Manager 原生包失败: %w", err)
+	}
+	defer gzipReader.Close()
+
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("读取 CPA-Manager 原生包失败: %w", err)
+		}
+		if header == nil || header.FileInfo().IsDir() {
+			continue
+		}
+		if !isCPAManagerExecutableName(filepath.Base(header.Name)) {
+			continue
+		}
+
+		targetFile, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.FileInfo().Mode())
+		if err != nil {
+			return fmt.Errorf("创建 CPA-Manager 可执行文件失败: %w", err)
+		}
+		_, copyErr := io.Copy(targetFile, tarReader)
+		closeErr := targetFile.Close()
+		if copyErr != nil {
+			return fmt.Errorf("解压 CPA-Manager 可执行文件失败: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("写入 CPA-Manager 可执行文件失败: %w", closeErr)
+		}
+		return nil
+	}
+	return errors.New("CPA-Manager 原生包中未找到 cpa-manager 可执行文件")
+}
+
 func resolveZipEntryDestination(targetDirectory string, entryName string) (string, error) {
 	targetDirectory = strings.TrimSpace(targetDirectory)
 	if targetDirectory == "" {
@@ -2039,6 +2929,11 @@ func findExecutableEntry(files []*zip.File) *zip.File {
 func isCPAExecutableName(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
 	return lower == "cli-proxy-api.exe" || lower == "cli-proxy-api"
+}
+
+func isCPAManagerExecutableName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return lower == "cpa-manager.exe" || lower == "cpa-manager"
 }
 
 func tryDeleteFile(path string) {

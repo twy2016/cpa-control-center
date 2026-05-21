@@ -87,7 +87,7 @@ const cpaManagerUpdateTone = computed(() => {
   if (/(失败|错误|超时|timeout|error|fail|http\s*\d+)/.test(message)) {
     return 'error'
   }
-  if (update.tagName || update.available) {
+  if (update.available) {
     return 'available'
   }
   return 'neutral'
@@ -98,6 +98,9 @@ const latestVersion = computed(() => launcherStore.status.update.tagName || t('c
 const canInstallLatest = computed(() => Boolean(resolvedInstallDirectory.value) && !launcherStore.busy)
 const canApplyUpdate = computed(
   () => launcherStore.status.update.available && Boolean(launcherStore.settings.executablePath.trim()) && !launcherStore.busy,
+)
+const canApplyCPAManagerUpdate = computed(
+  () => launcherStore.status.cpaManagerUpdate.available && Boolean(launcherStore.settings.executablePath.trim()) && !launcherStore.busy,
 )
 const codexContentBusy = computed(() => (
   codexLocalConfigStore.busy || codexLocalConfigStore.contentLoading || codexLocalConfigStore.contentSaving || codexLocalConfigStore.contentTesting
@@ -351,6 +354,30 @@ async function reloadSelectedCodexProfile() {
   }
 }
 
+async function applyCPAManagerUpdate() {
+  if (!launcherStore.status.cpaManagerUpdate.available) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      t('launcher.dialogs.applyCPAManagerUpdateMessage', { version: launcherStore.status.cpaManagerUpdate.tagName || t('common.notAvailable') }),
+      t('launcher.dialogs.applyCPAManagerUpdateTitle'),
+      {
+        confirmButtonText: t('launcher.applyUpdate'),
+        cancelButtonText: t('launcher.dialogs.cancel'),
+        customClass: 'cpa-message-box',
+        type: 'warning',
+      },
+    )
+    await launcherStore.updateCPAManager()
+    ElMessage.success(t('launcher.messages.cpaManagerUpdated'))
+  } catch (error) {
+    if (!isDialogDismissed(error)) {
+      ElMessage.error(toErrorMessage(error))
+    }
+  }
+}
+
 async function saveSelectedCodexProfile() {
   try {
     const result = await codexLocalConfigStore.saveProfileContent()
@@ -495,6 +522,11 @@ async function testNewCodexProfile() {
               <small>{{ cpaManagerUpdateCheckedAt }}</small>
             </div>
             <p class="launcher-update-strip__summary" :title="cpaManagerUpdateSummary">{{ cpaManagerUpdateSummary }}</p>
+            <div v-if="launcherStore.status.cpaManagerUpdate.available" class="launcher-update-strip__actions">
+              <el-button type="primary" size="small" :loading="launcherStore.busy" :disabled="!canApplyCPAManagerUpdate" @click="applyCPAManagerUpdate">
+                {{ t('launcher.applyUpdate') }}
+              </el-button>
+            </div>
           </div>
         </div>
       </article>

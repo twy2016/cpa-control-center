@@ -248,6 +248,9 @@ func (s *Store) LoadSettings() (AppSettings, error) {
 			if _, ok := launcherKeys["lastInstalledVersion"]; !ok {
 				raw.Launcher.LastInstalledVersion = defaults.Launcher.LastInstalledVersion
 			}
+			if _, ok := launcherKeys["cpaManagerLastInstalledVersion"]; !ok {
+				raw.Launcher.CPAManagerLastInstalledVersion = defaults.Launcher.CPAManagerLastInstalledVersion
+			}
 		}
 	}
 

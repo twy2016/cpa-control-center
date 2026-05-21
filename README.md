@@ -24,7 +24,7 @@
 - 独立的 quota 自动刷新 cron，可在应用打开期间周期性刷新 Codex 额度快照
 - 实时任务日志与扫描历史
 - 支持导出 `401 Invalid` 和 `Quota Limited` 为 CSV / JSON
-- 启动本地 CPA 时同步启动内嵌 CPA-Manager Usage Service
+- 启动本地 CPA 时同步启动 CPA-Manager Usage Service
 - 继续使用 CPA 自带 `/management.html` 作为管理入口，并在面板中配置 Usage Service 地址
 - 内置中英文双语界面
 
@@ -178,15 +178,17 @@ quota 快照现在有四种更新方式：
 
 ### 7. 本地 CPA 启动器与 CPA-Manager Usage Service
 
-启动器可以管理本机 CPA 运行时，并在 CPA 启动后同步启动内嵌的 CPA-Manager Usage Service。
+启动器可以管理本机 CPA 运行时，并在 CPA 启动后同步启动 CPA-Manager Usage Service。
 
 当前方案是：
 
 - 管理入口仍然打开 CPA 自带的 `/management.html`
+- 启动器优先使用已下载的 CPA-Manager 原生二进制；未安装或启动失败时回退到 Control Center 内嵌的 Usage Service
 - Usage Service 作为单独的本地服务运行，默认地址为 `http://127.0.0.1:18317`
 - 启动器详情页会显示 `Usage Service URL` 和 SQLite 数据库路径
 - CPA 管理面板需要在 `CPA-Manager 配置` 中填写该 `Usage Service URL`
 - 如果 `18317` 已被占用，Usage Service 会自动向后寻找可用端口
+- 开启启动时检查更新后，启动器会下载 CPA-Manager 上游原生包并刷新 CPA 面板缓存
 
 为了让 CPA 面板出现 Usage Service 配置入口，启动器会确保 CPA 的管理面板仓库指向：
 
@@ -341,6 +343,7 @@ remote-management:
 - `state.db`
 - `app.log`
 - `exports/`
+- `cpa-manager/bin/`
 - `cpa-manager/usage.sqlite`
 
 当前实现会保留最新快照，以及最近 `30` 次扫描历史。
@@ -351,7 +354,7 @@ remote-management:
 cpa-control-center/
 |- frontend/                     # Vue 3 + TypeScript 前端
 |- internal/backend/             # CPA 客户端、状态存储、任务编排
-|- internal/cpamanager/          # 内嵌 CPA-Manager Usage Service
+|- internal/cpamanager/          # CPA-Manager Usage Service 内嵌兜底实现
 |- build/                        # Wails 构建资源与平台打包配置
 |- scripts/build-macos.sh        # macOS 构建脚本
 |- .github/workflows/            # CI / Release 工作流

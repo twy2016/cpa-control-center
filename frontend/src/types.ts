@@ -61,6 +61,7 @@ export interface LauncherSettings {
   checkForUpdatesOnStartup: boolean
   gitHubRepo: string
   lastInstalledVersion: string
+  cpaManagerLastInstalledVersion: string
 }
 
 export interface LauncherRuntimeInfo {

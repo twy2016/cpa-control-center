@@ -603,6 +603,13 @@ func (b *Backend) UpdateLauncherCPA() (LauncherStatusSnapshot, error) {
 	return b.launcher.UpdateCPA()
 }
 
+func (b *Backend) UpdateLauncherCPAManager() (LauncherStatusSnapshot, error) {
+	if b.launcher == nil {
+		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")
+	}
+	return b.launcher.UpdateCPAManager()
+}
+
 func (b *Backend) GenerateLauncherConfig(input LauncherConfigTemplateInput) (LauncherStatusSnapshot, error) {
 	if b.launcher == nil {
 		return LauncherStatusSnapshot{}, errors.New("launcher not initialized")

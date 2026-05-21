@@ -20,6 +20,7 @@ import {
   StartLauncherService,
   StopLauncherService,
   UpdateLauncherCPA,
+  UpdateLauncherCPAManager,
 } from '../../wailsjs/go/main/App'
 import { backend as backendModels } from '../../wailsjs/go/models'
 import type {
@@ -211,6 +212,16 @@ export const useLauncherStore = defineStore('launcherStore', {
       this.busy = true
       try {
         const snapshot = await UpdateLauncherCPA()
+        this.mergeSnapshot(snapshot as unknown as Partial<LauncherStatusSnapshot>, true)
+        return this.status
+      } finally {
+        this.busy = false
+      }
+    },
+    async updateCPAManager() {
+      this.busy = true
+      try {
+        const snapshot = await UpdateLauncherCPAManager()
         this.mergeSnapshot(snapshot as unknown as Partial<LauncherStatusSnapshot>, true)
         return this.status
       } finally {

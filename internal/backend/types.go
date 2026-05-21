@@ -40,16 +40,17 @@ type ScheduleSettings struct {
 }
 
 type LauncherSettings struct {
-	ExecutablePath               string `json:"executablePath"`
-	ConfigPath                   string `json:"configPath"`
-	AutoStartService             bool   `json:"autoStartService"`
-	AutoStartDelaySeconds        int    `json:"autoStartDelaySeconds"`
-	LaunchOnWindowsStartup       bool   `json:"launchOnWindowsStartup"`
-	MinimizeToTrayOnClose        bool   `json:"minimizeToTrayOnClose"`
-	OpenManagementPageAfterStart bool   `json:"openManagementPageAfterStart"`
-	CheckForUpdatesOnStartup     bool   `json:"checkForUpdatesOnStartup"`
-	GitHubRepo                   string `json:"gitHubRepo"`
-	LastInstalledVersion         string `json:"lastInstalledVersion"`
+	ExecutablePath                 string `json:"executablePath"`
+	ConfigPath                     string `json:"configPath"`
+	AutoStartService               bool   `json:"autoStartService"`
+	AutoStartDelaySeconds          int    `json:"autoStartDelaySeconds"`
+	LaunchOnWindowsStartup         bool   `json:"launchOnWindowsStartup"`
+	MinimizeToTrayOnClose          bool   `json:"minimizeToTrayOnClose"`
+	OpenManagementPageAfterStart   bool   `json:"openManagementPageAfterStart"`
+	CheckForUpdatesOnStartup       bool   `json:"checkForUpdatesOnStartup"`
+	GitHubRepo                     string `json:"gitHubRepo"`
+	LastInstalledVersion           string `json:"lastInstalledVersion"`
+	CPAManagerLastInstalledVersion string `json:"cpaManagerLastInstalledVersion"`
 }
 
 type LauncherRuntimeInfo struct {

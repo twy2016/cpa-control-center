@@ -124,6 +124,7 @@ export function createDefaultLauncherSettings(): LauncherSettings {
     checkForUpdatesOnStartup: true,
     gitHubRepo: 'router-for-me/CLIProxyAPI',
     lastInstalledVersion: '',
+    cpaManagerLastInstalledVersion: '',
   }
 }
 

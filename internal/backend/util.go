@@ -69,13 +69,14 @@ func defaultSettings(exportDir string) AppSettings {
 
 func defaultLauncherSettings() LauncherSettings {
 	return LauncherSettings{
-		AutoStartService:             false,
-		AutoStartDelaySeconds:        0,
-		LaunchOnWindowsStartup:       false,
-		MinimizeToTrayOnClose:        true,
-		OpenManagementPageAfterStart: true,
-		CheckForUpdatesOnStartup:     true,
-		GitHubRepo:                   defaultLauncherRepo,
+		AutoStartService:               false,
+		AutoStartDelaySeconds:          0,
+		LaunchOnWindowsStartup:         false,
+		MinimizeToTrayOnClose:          true,
+		OpenManagementPageAfterStart:   true,
+		CheckForUpdatesOnStartup:       true,
+		GitHubRepo:                     defaultLauncherRepo,
+		CPAManagerLastInstalledVersion: embeddedCPAManagerVersion,
 	}
 }
 
@@ -175,6 +176,9 @@ func normalizeLauncherSettings(input LauncherSettings) LauncherSettings {
 	settings.GitHubRepo = defaultLauncherRepo
 	if trimmed := strings.TrimSpace(input.LastInstalledVersion); trimmed != "" {
 		settings.LastInstalledVersion = trimmed
+	}
+	if trimmed := strings.TrimSpace(input.CPAManagerLastInstalledVersion); trimmed != "" {
+		settings.CPAManagerLastInstalledVersion = trimmed
 	}
 	return settings
 }
